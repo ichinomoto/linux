@@ -184,7 +184,7 @@ static int tc3589x_keypad_init_key_hardware(struct tc_keypad *keypad)
 #define TC35893_DATA_REGS		4
 #define TC35893_KEYCODE_FIFO_EMPTY	0x7f
 #define TC35893_KEYCODE_FIFO_CLEAR	0xff
-#define TC35893_KEYPAD_ROW_SHIFT	0x3
+#define TC35893_KEYPAD_ROW_SHIFT	0x4
 
 static irqreturn_t tc3589x_keypad_irq(int irq, void *dev)
 {

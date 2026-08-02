@@ -3,6 +3,7 @@
 /dts-v1/;
 
 #include "rk3128.dtsi"
+#include <dt-bindings/input/input.h>
 
 / {
 	model = "King Jim Pomera DM200";
@@ -20,6 +21,37 @@
 	memory@60000000 {
 		device_type = "memory";
 		reg = <0x60000000 0x20000000>;
+	};
+
+	keyboard-modifiers {
+		compatible = "gpio-keys";
+		autorepeat;
+		pinctrl-names = "default";
+		pinctrl-0 = <&keyboard_modifier_pins>;
+
+		left-alt {
+			label = "Left Alt";
+			linux,code = <KEY_LEFTALT>;
+			gpios = <&gpio0 RK_PB5 GPIO_ACTIVE_LOW>;
+		};
+
+		left-control {
+			label = "Left Control";
+			linux,code = <KEY_LEFTCTRL>;
+			gpios = <&gpio0 RK_PB6 GPIO_ACTIVE_LOW>;
+		};
+
+		left-shift {
+			label = "Left Shift";
+			linux,code = <KEY_LEFTSHIFT>;
+			gpios = <&gpio0 RK_PB7 GPIO_ACTIVE_LOW>;
+		};
+
+		right-shift {
+			label = "Right Shift";
+			linux,code = <KEY_RIGHTSHIFT>;
+			gpios = <&gpio0 RK_PB4 GPIO_ACTIVE_LOW>;
+		};
 	};
 };
 
@@ -46,6 +78,103 @@
 
 &i2c0 {
 	status = "okay";
+
+	keyboard@45 {
+		compatible = "toshiba,tc35894";
+		reg = <0x45>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PA7 IRQ_TYPE_EDGE_FALLING>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		reset-gpios = <&gpio0 RK_PD1 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&tc35894_irq>, <&tc35894_reset>;
+		wakeup-source;
+
+		keypad {
+			compatible = "toshiba,tc3589x-keypad";
+			interrupts = <6>;
+			keypad,num-columns = <12>;
+			keypad,num-rows = <8>;
+			wakeup-source;
+			linux,keymap =
+				<MATRIX_KEY(7, 0, KEY_ESC)>,
+				<MATRIX_KEY(6, 0, KEY_GRAVE)>,
+				<MATRIX_KEY(5, 0, KEY_F1)>,
+				<MATRIX_KEY(4, 0, KEY_F2)>,
+				<MATRIX_KEY(7, 2, KEY_F3)>,
+				<MATRIX_KEY(7, 6, KEY_F4)>,
+				<MATRIX_KEY(7, 9, KEY_F5)>,
+				<MATRIX_KEY(6, 9, KEY_F6)>,
+				<MATRIX_KEY(2, 8, KEY_F7)>,
+				<MATRIX_KEY(1, 8, KEY_F8)>,
+				<MATRIX_KEY(0, 8, KEY_F9)>,
+				<MATRIX_KEY(3, 7, KEY_F10)>,
+				<MATRIX_KEY(2, 7, KEY_INSERT)>,
+				<MATRIX_KEY(1, 7, KEY_DELETE)>,
+				<MATRIX_KEY(3, 0, KEY_1)>,
+				<MATRIX_KEY(2, 0, KEY_2)>,
+				<MATRIX_KEY(7, 1, KEY_3)>,
+				<MATRIX_KEY(6, 2, KEY_4)>,
+				<MATRIX_KEY(6, 6, KEY_5)>,
+				<MATRIX_KEY(5, 6, KEY_6)>,
+				<MATRIX_KEY(5, 9, KEY_7)>,
+				<MATRIX_KEY(3, 8, KEY_8)>,
+				<MATRIX_KEY(4, 7, KEY_9)>,
+				<MATRIX_KEY(4, 5, KEY_0)>,
+				<MATRIX_KEY(3, 5, KEY_MINUS)>,
+				<MATRIX_KEY(2, 5, KEY_EQUAL)>,
+				<MATRIX_KEY(1, 5, KEY_YEN)>,
+				<MATRIX_KEY(2, 4, KEY_BACKSPACE)>,
+				<MATRIX_KEY(1, 0, KEY_TAB)>,
+				<MATRIX_KEY(6, 1, KEY_Q)>,
+				<MATRIX_KEY(5, 1, KEY_W)>,
+				<MATRIX_KEY(5, 2, KEY_E)>,
+				<MATRIX_KEY(4, 2, KEY_R)>,
+				<MATRIX_KEY(4, 6, KEY_T)>,
+				<MATRIX_KEY(3, 6, KEY_Y)>,
+				<MATRIX_KEY(4, 9, KEY_U)>,
+				<MATRIX_KEY(4, 8, KEY_I)>,
+				<MATRIX_KEY(5, 7, KEY_O)>,
+				<MATRIX_KEY(6, 5, KEY_P)>,
+				<MATRIX_KEY(5, 5, KEY_LEFTBRACE)>,
+				<MATRIX_KEY(3, 4, KEY_RIGHTBRACE)>,
+				<MATRIX_KEY(5, 3, KEY_ENTER)>,
+				<MATRIX_KEY(0, 0, KEY_CAPSLOCK)>,
+				<MATRIX_KEY(4, 1, KEY_A)>,
+				<MATRIX_KEY(3, 1, KEY_S)>,
+				<MATRIX_KEY(3, 2, KEY_D)>,
+				<MATRIX_KEY(2, 2, KEY_F)>,
+				<MATRIX_KEY(2, 6, KEY_G)>,
+				<MATRIX_KEY(3, 9, KEY_H)>,
+				<MATRIX_KEY(5, 8, KEY_J)>,
+				<MATRIX_KEY(6, 7, KEY_K)>,
+				<MATRIX_KEY(7, 5, KEY_L)>,
+				<MATRIX_KEY(4, 4, KEY_SEMICOLON)>,
+				<MATRIX_KEY(7, 3, KEY_APOSTROPHE)>,
+				<MATRIX_KEY(6, 3, KEY_BACKSLASH)>,
+				<MATRIX_KEY(2, 1, KEY_Z)>,
+				<MATRIX_KEY(1, 1, KEY_X)>,
+				<MATRIX_KEY(1, 2, KEY_C)>,
+				<MATRIX_KEY(0, 2, KEY_V)>,
+				<MATRIX_KEY(1, 6, KEY_B)>,
+				<MATRIX_KEY(2, 9, KEY_N)>,
+				<MATRIX_KEY(6, 8, KEY_M)>,
+				<MATRIX_KEY(7, 7, KEY_COMMA)>,
+				<MATRIX_KEY(6, 4, KEY_DOT)>,
+				<MATRIX_KEY(5, 4, KEY_SLASH)>,
+				<MATRIX_KEY(4, 3, KEY_RO)>,
+				<MATRIX_KEY(3, 3, KEY_UP)>,
+				<MATRIX_KEY(0, 4, KEY_LEFTMETA)>,
+				<MATRIX_KEY(0, 1, KEY_MUHENKAN)>,
+				<MATRIX_KEY(0, 6, KEY_SPACE)>,
+				<MATRIX_KEY(7, 8, KEY_HENKAN)>,
+				<MATRIX_KEY(7, 4, KEY_KATAKANAHIRAGANA)>,
+				<MATRIX_KEY(2, 3, KEY_LEFT)>,
+				<MATRIX_KEY(1, 3, KEY_DOWN)>,
+				<MATRIX_KEY(0, 3, KEY_RIGHT)>;
+		};
+	};
 
 	rk818: pmic@1c {
 		compatible = "rockchip,rk818";
@@ -176,6 +305,24 @@
 	pmic {
 		pmic_int: pmic-int {
 			rockchip,pins = <1 RK_PB1 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	keyboard {
+		keyboard_modifier_pins: keyboard-modifier-pins {
+			rockchip,pins =
+				<0 RK_PB4 RK_FUNC_GPIO &pcfg_pull_up>,
+				<0 RK_PB5 RK_FUNC_GPIO &pcfg_pull_up>,
+				<0 RK_PB6 RK_FUNC_GPIO &pcfg_pull_up>,
+				<0 RK_PB7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		tc35894_irq: tc35894-irq {
+			rockchip,pins = <0 RK_PA7 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		tc35894_reset: tc35894-reset {
+			rockchip,pins = <0 RK_PD1 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 };

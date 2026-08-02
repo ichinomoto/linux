@@ -8,6 +8,8 @@
 
 #include <linux/module.h>
 #include <linux/interrupt.h>
+#include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
 #include <linux/slab.h>
@@ -277,6 +279,16 @@ static int tc3589x_chip_init(struct tc3589x *tc3589x)
 	if (ret < 0)
 		return ret;
 
+	ret = tc3589x_reg_write(tc3589x, TC3589x_DKBDIC,
+				TC3589x_DKBDMSK_ELINT | TC3589x_DKBDMSK_EINT);
+	if (ret < 0)
+		return ret;
+
+	ret = tc3589x_reg_write(tc3589x, TC3589x_DKBDMSK,
+				TC3589x_DKBDMSK_ELINT | TC3589x_DKBDMSK_EINT);
+	if (ret < 0)
+		return ret;
+
 	/* Clear the reset interrupt. */
 	return tc3589x_reg_write(tc3589x, TC3589x_RSTINTCLR, 0x1);
 }
@@ -356,6 +368,7 @@ static int tc3589x_probe(struct i2c_client *i2c)
 	struct device_node *np = i2c->dev.of_node;
 	struct tc3589x_platform_data *pdata = dev_get_platdata(&i2c->dev);
 	struct tc3589x *tc3589x;
+	struct gpio_desc *reset_gpio;
 	enum tc3589x_version version;
 	int ret;
 
@@ -373,6 +386,18 @@ static int tc3589x_probe(struct i2c_client *i2c)
 	if (!i2c_check_functionality(i2c->adapter, I2C_FUNC_SMBUS_BYTE_DATA
 				     | I2C_FUNC_SMBUS_I2C_BLOCK))
 		return -EIO;
+
+	reset_gpio = devm_gpiod_get_optional(&i2c->dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(reset_gpio))
+		return dev_err_probe(&i2c->dev, PTR_ERR(reset_gpio),
+				     "failed to get reset GPIO\n");
+
+	if (reset_gpio) {
+		gpiod_set_value_cansleep(reset_gpio, 1);
+		usleep_range(1000, 2000);
+		gpiod_set_value_cansleep(reset_gpio, 0);
+		usleep_range(1000, 2000);
+	}
 
 	tc3589x = devm_kzalloc(&i2c->dev, sizeof(struct tc3589x),
 				GFP_KERNEL);
