@@ -853,6 +853,8 @@ patternProperties:
     description: Kinetic Technologies
   "^kingdisplay,.*":
     description: King & Display Technology Co., Ltd.
+  "^kingjim,.*":
+    description: KING JIM CO., LTD.
   "^kingnovel,.*":
     description: Kingnovel Technology Co., Ltd.
   "^kionix,.*":
