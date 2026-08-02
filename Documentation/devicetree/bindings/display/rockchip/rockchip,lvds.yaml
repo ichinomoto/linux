@@ -14,6 +14,7 @@ properties:
   compatible:
     enum:
       - rockchip,px30-lvds
+      - rockchip,rk3128-lvds
       - rockchip,rk3288-lvds
 
   reg:
@@ -87,7 +88,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: rockchip,px30-lvds
+            enum:
+              - rockchip,px30-lvds
+              - rockchip,rk3128-lvds
 
     then:
       properties:

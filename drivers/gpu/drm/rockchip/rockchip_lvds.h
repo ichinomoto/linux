@@ -109,6 +109,15 @@
 #define LVDS_VESA_18				2
 #define LVDS_JEIDA_18				3
 
+#define RK3128_LVDS_GRF_CON0			0x0150
+#define   RK3128_LVDS_DATA_SEL(val)		FIELD_PREP_WM16(BIT(0), (val))
+#define   RK3128_LVDS_OUTPUT_FORMAT(val)	FIELD_PREP_WM16(GENMASK(2, 1), (val))
+#define   RK3128_LVDS_MSBSEL(val)		FIELD_PREP_WM16(BIT(3), (val))
+#define   RK3128_LVDS_MODE_EN(val)		FIELD_PREP_WM16(BIT(6), (val))
+#define   RK3128_LVDS_TTL_EN(val)		FIELD_PREP_WM16(BIT(7), (val))
+#define   RK3128_LVDS_LANE0_EN(val)		FIELD_PREP_WM16(BIT(8), (val))
+#define   RK3128_LVDS_FORCEX_EN(val)		FIELD_PREP_WM16(BIT(9), (val))
+
 #define PX30_LVDS_GRF_PD_VO_CON0		0x434
 #define   PX30_LVDS_TIE_CLKS(val)		FIELD_PREP_WM16(BIT(8), (val))
 #define   PX30_LVDS_INVERT_CLKS(val)		FIELD_PREP_WM16(BIT(9), (val))
