@@ -1067,6 +1067,11 @@ properties:
           - const: rockchip,rk3128-evb
           - const: rockchip,rk3128
 
+      - description: King Jim Pomera DM200
+        items:
+          - const: kingjim,pomera-dm200
+          - const: rockchip,rk3128
+
       - description: Rockchip RK3228 Evaluation board
         items:
           - const: rockchip,rk3228-evb
