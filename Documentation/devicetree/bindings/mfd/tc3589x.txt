@@ -20,6 +20,9 @@ Required properties:
  - #interrupt-cells : should be <1>, the first cell is the IRQ offset on this
    TC3589x interrupt controller.
 
+Optional properties:
+ - reset-gpios : GPIO connected to the active-high external reset input.
+
 Optional nodes:
 
 - GPIO
