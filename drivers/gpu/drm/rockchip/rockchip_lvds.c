@@ -325,6 +325,76 @@ static void rk3288_lvds_encoder_disable(struct drm_encoder *encoder)
 	drm_panel_unprepare(lvds->panel);
 }
 
+static int rk3128_lvds_grf_config(struct rockchip_lvds *lvds)
+{
+	u32 format;
+	u32 val;
+
+	switch (lvds->format) {
+	case LVDS_VESA_24:
+		format = 0;
+		break;
+	case LVDS_JEIDA_24:
+		format = 1;
+		break;
+	case LVDS_JEIDA_18:
+		format = 2;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	val = RK3128_LVDS_DATA_SEL(0) |
+	      RK3128_LVDS_OUTPUT_FORMAT(format) |
+	      RK3128_LVDS_MSBSEL(1) |
+	      RK3128_LVDS_MODE_EN(1) |
+	      RK3128_LVDS_TTL_EN(0) |
+	      RK3128_LVDS_LANE0_EN(1) |
+	      RK3128_LVDS_FORCEX_EN(1);
+
+	return regmap_write(lvds->grf, RK3128_LVDS_GRF_CON0, val);
+}
+
+static void rk3128_lvds_encoder_enable(struct drm_encoder *encoder)
+{
+	struct rockchip_lvds *lvds = encoder_to_lvds(encoder);
+	int ret;
+
+	drm_panel_prepare(lvds->panel);
+
+	ret = rk3128_lvds_grf_config(lvds);
+	if (ret) {
+		DRM_DEV_ERROR(lvds->dev, "failed to configure LVDS: %d\n", ret);
+		goto err_unprepare_panel;
+	}
+
+	ret = phy_power_on(lvds->dphy);
+	if (ret) {
+		DRM_DEV_ERROR(lvds->dev, "failed to power on LVDS PHY: %d\n", ret);
+		goto err_disable_lvds;
+	}
+
+	drm_panel_enable(lvds->panel);
+	return;
+
+err_disable_lvds:
+	regmap_write(lvds->grf, RK3128_LVDS_GRF_CON0,
+		     RK3128_LVDS_MODE_EN(0) | RK3128_LVDS_TTL_EN(0));
+err_unprepare_panel:
+	drm_panel_unprepare(lvds->panel);
+}
+
+static void rk3128_lvds_encoder_disable(struct drm_encoder *encoder)
+{
+	struct rockchip_lvds *lvds = encoder_to_lvds(encoder);
+
+	drm_panel_disable(lvds->panel);
+	regmap_write(lvds->grf, RK3128_LVDS_GRF_CON0,
+		     RK3128_LVDS_MODE_EN(0) | RK3128_LVDS_TTL_EN(0));
+	phy_power_off(lvds->dphy);
+	drm_panel_unprepare(lvds->panel);
+}
+
 static int px30_lvds_poweron(struct rockchip_lvds *lvds)
 {
 	int ret;
@@ -433,6 +503,12 @@ struct drm_encoder_helper_funcs rk3288_lvds_encoder_helper_funcs = {
 	.atomic_check = rockchip_lvds_encoder_atomic_check,
 };
 
+static const struct drm_encoder_helper_funcs rk3128_lvds_encoder_helper_funcs = {
+	.enable = rk3128_lvds_encoder_enable,
+	.disable = rk3128_lvds_encoder_disable,
+	.atomic_check = rockchip_lvds_encoder_atomic_check,
+};
+
 static const
 struct drm_encoder_helper_funcs px30_lvds_encoder_helper_funcs = {
 	.enable = px30_lvds_encoder_enable,
@@ -475,6 +551,32 @@ static int rk3288_lvds_probe(struct platform_device *pdev,
 	return 0;
 }
 
+static void rk3128_lvds_phy_exit(void *data)
+{
+	phy_exit(data);
+}
+
+static int rk3128_lvds_probe(struct platform_device *pdev,
+			     struct rockchip_lvds *lvds)
+{
+	int ret;
+
+	lvds->dphy = devm_phy_get(&pdev->dev, "dphy");
+	if (IS_ERR(lvds->dphy))
+		return PTR_ERR(lvds->dphy);
+
+	ret = phy_init(lvds->dphy);
+	if (ret)
+		return ret;
+
+	ret = devm_add_action_or_reset(&pdev->dev, rk3128_lvds_phy_exit,
+				       lvds->dphy);
+	if (ret)
+		return ret;
+
+	return phy_set_mode(lvds->dphy, PHY_MODE_LVDS);
+}
+
 static int px30_lvds_probe(struct platform_device *pdev,
 			   struct rockchip_lvds *lvds)
 {
@@ -508,12 +610,21 @@ static const struct rockchip_lvds_soc_data rk3288_lvds_data = {
 	.helper_funcs = &rk3288_lvds_encoder_helper_funcs,
 };
 
+static const struct rockchip_lvds_soc_data rk3128_lvds_data = {
+	.probe = rk3128_lvds_probe,
+	.helper_funcs = &rk3128_lvds_encoder_helper_funcs,
+};
+
 static const struct rockchip_lvds_soc_data px30_lvds_data = {
 	.probe = px30_lvds_probe,
 	.helper_funcs = &px30_lvds_encoder_helper_funcs,
 };
 
 static const struct of_device_id rockchip_lvds_dt_ids[] = {
+	{
+		.compatible = "rockchip,rk3128-lvds",
+		.data = &rk3128_lvds_data
+	},
 	{
 		.compatible = "rockchip,rk3288-lvds",
 		.data = &rk3288_lvds_data
