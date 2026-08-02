@@ -17,10 +17,50 @@
 #include "core.h"
 #include "pm.h"
 
-#define RK3288_TIMER6_7_PHYS 0xff810000
+#define RK3128_TIMER5_PHYS      0x200440a0
+#define RK3128_CRU_PHYS         0x20000000
+#define RK3128_CRU_MISC_CON     0x134
+#define RK3288_TIMER6_7_PHYS    0xff810000
+
+static void __init rk3128_stimer_init(void)
+{
+	void __iomem *reg_base;
+
+	/*
+	 * The architected timer needs timer5 to run, but the stock DM200
+	 * U-Boot does not enable it.  Mirror the vendor RK312x kernel setup.
+	 */
+	reg_base = ioremap(RK3128_TIMER5_PHYS, SZ_4K);
+	if (!reg_base) {
+		pr_err("rockchip: could not map timer5 registers\n");
+		return;
+	}
+
+	writel_relaxed(0, reg_base + 0x10);
+	dsb();
+	writel_relaxed(0xffffffff, reg_base + 0x00);
+	writel_relaxed(0xffffffff, reg_base + 0x04);
+	dsb();
+	writel_relaxed(1, reg_base + 0x10);
+	dsb();
+	iounmap(reg_base);
+
+	reg_base = ioremap(RK3128_CRU_PHYS, SZ_4K);
+	if (!reg_base) {
+		pr_err("rockchip: could not map CRU registers\n");
+		return;
+	}
+
+	writel_relaxed(0x80000000, reg_base + RK3128_CRU_MISC_CON);
+	dsb();
+	iounmap(reg_base);
+}
 
 static void __init rockchip_timer_init(void)
 {
+	if (of_machine_is_compatible("rockchip,rk3128"))
+		rk3128_stimer_init();
+
 	if (of_machine_is_compatible("rockchip,rk3288")) {
 		void __iomem *reg_base;
 
@@ -56,6 +96,7 @@ static const char * const rockchip_board_dt_compat[] = {
 	"rockchip,rk3066a",
 	"rockchip,rk3066b",
 	"rockchip,rk3188",
+	"rockchip,rk3128",
 	"rockchip,rk3228",
 	"rockchip,rk3288",
 	"rockchip,rv1108",
