@@ -57,6 +57,11 @@ static const struct resource rk817_charger_resources[] = {
 	DEFINE_RES_IRQ(RK817_IRQ_PLUG_OUT),
 };
 
+static const struct resource rk818_charger_resources[] = {
+	DEFINE_RES_IRQ(RK818_IRQ_PLUG_IN),
+	DEFINE_RES_IRQ(RK818_IRQ_PLUG_OUT),
+};
+
 static const struct mfd_cell rk805s[] = {
 	{ .name = "rk808-clkout", },
 	{ .name = "rk808-regulator", },
@@ -136,6 +141,11 @@ static const struct mfd_cell rk818s[] = {
 		.name = "rk808-rtc",
 		.num_resources = ARRAY_SIZE(rtc_resources),
 		.resources = rtc_resources,
+	},
+	{
+		.name = "rk818-charger",
+		.num_resources = ARRAY_SIZE(rk818_charger_resources),
+		.resources = rk818_charger_resources,
 	},
 };
 

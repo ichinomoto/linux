@@ -105,6 +105,21 @@ properties:
         unevaluatedProperties: false
     unevaluatedProperties: false
 
+  charger:
+    type: object
+    $ref: /schemas/power/supply/power-supply.yaml
+
+    properties:
+      monitored-battery:
+        description:
+          Phandle to a simple-battery node containing the battery design and
+          open-circuit-voltage data used by the RK818 fuel gauge.
+
+    required:
+      - monitored-battery
+
+    additionalProperties: false
+
 required:
   - compatible
   - reg
