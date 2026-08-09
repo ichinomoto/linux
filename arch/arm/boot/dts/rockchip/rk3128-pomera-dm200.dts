@@ -386,6 +386,11 @@
 };
 
 &pinctrl {
+	pcfg_output_low: pcfg-output-low {
+		bias-disable;
+		output-low;
+	};
+
 	pcfg_pull_up: pcfg-pull-up {
 		bias-pull-up;
 	};
@@ -416,7 +421,7 @@
 
 	display {
 		backlight_enable: backlight-enable {
-			rockchip,pins = <0 RK_PD3 RK_FUNC_GPIO &pcfg_pull_none>;
+			rockchip,pins = <0 RK_PD3 RK_FUNC_GPIO &pcfg_output_low>;
 		};
 
 		panel_enable: panel-enable {
