@@ -115,13 +115,26 @@ static bool rk817_is_volatile_reg(struct device *dev, unsigned int reg)
 	return false;
 }
 
+static bool rk818_is_volatile_reg(struct device *dev, unsigned int reg)
+{
+	if (rk808_is_volatile_reg(dev, reg))
+		return true;
+
+	switch (reg) {
+	case RK818_SUP_STS_REG ... RK818_SAVE_DATA19:
+		return true;
+	}
+
+	return false;
+}
+
 
 static const struct regmap_config rk818_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.max_register = RK818_USB_CTRL_REG,
+	.max_register = RK818_SAVE_DATA19,
 	.cache_type = REGCACHE_MAPLE,
-	.volatile_reg = rk808_is_volatile_reg,
+	.volatile_reg = rk818_is_volatile_reg,
 };
 
 static const struct regmap_config rk805_regmap_config = {

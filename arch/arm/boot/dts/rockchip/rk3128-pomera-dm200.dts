@@ -35,6 +35,25 @@
 		pwms = <&pwm0 0 25000 PWM_POLARITY_INVERTED>;
 	};
 
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion";
+		charge-full-design-microamp-hours = <4200000>;
+		voltage-min-design-microvolt = <3350000>;
+		voltage-max-design-microvolt = <4200000>;
+		constant-charge-current-max-microamp = <1000000>;
+		constant-charge-voltage-max-microvolt = <4250000>;
+		ocv-capacity-celsius = <20>;
+		ocv-capacity-table-0 =
+			<4174000 100>, <4123000 95>, <4087000 90>,
+			<4033000 85>, <3978000 80>, <3958000 75>,
+			<3933000 70>, <3907000 65>, <3881000 60>,
+			<3839000 55>, <3812000 50>, <3796000 45>,
+			<3785000 40>, <3778000 35>, <3775000 30>,
+			<3770000 25>, <3752000 20>, <3719000 15>,
+			<3693000 10>, <3677000 5>, <3350000 0>;
+	};
+
 	panel {
 		compatible = "panel-lvds";
 		backlight = <&backlight>;
@@ -237,6 +256,10 @@
 		system-power-controller;
 		wakeup-source;
 		#clock-cells = <1>;
+
+		charger {
+			monitored-battery = <&battery>;
+		};
 
 		regulators {
 			vdd_arm: DCDC_REG1 {
