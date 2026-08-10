@@ -24,6 +24,26 @@
 		reg = <0x60000000 0x20000000>;
 	};
 
+	wifi_vcc: wifi-vcc {
+		compatible = "regulator-fixed";
+		gpio = <&gpio0 RK_PD6 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_power>;
+		regulator-name = "wifi-vcc";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		startup-delay-us = <20000>;
+	};
+
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_reset>;
+		reset-gpios = <&gpio3 RK_PD3 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <200>;
+		power-off-delay-us = <200>;
+	};
+
 	backlight: backlight {
 		compatible = "pwm-backlight";
 		brightness-levels = <0 255>;
@@ -428,6 +448,20 @@
 			rockchip,pins = <0 RK_PD0 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
+
+	wireless {
+		wifi_power: wifi-power {
+			rockchip,pins = <0 RK_PD6 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		wifi_host_wake: wifi-host-wake {
+			rockchip,pins = <3 RK_PC7 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		wifi_reset: wifi-reset {
+			rockchip,pins = <3 RK_PD3 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
 };
 
 &pwm0 {
@@ -445,19 +479,30 @@
 	status = "okay";
 };
 
-/*
- * The on-board Broadcom Wi-Fi device is attached here.  Keep the bus
- * disabled until its shared Wi-Fi/Bluetooth power sequencing is described.
- */
 &sdio {
 	bus-width = <4>;
 	cap-sdio-irq;
 	keep-power-in-suspend;
+	mmc-pwrseq = <&wifi_pwrseq>;
+	vmmc-supply = <&wifi_vcc>;
 	max-frequency = <50000000>;
 	non-removable;
+	#address-cells = <1>;
+	#size-cells = <0>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&sdio_clk &sdio_cmd &sdio_bus4>;
-	status = "disabled";
+	status = "okay";
+
+	wifi@1 {
+		compatible = "brcm,bcm43362-fmac", "brcm,bcm4329-fmac";
+		reg = <1>;
+		interrupt-parent = <&gpio3>;
+		interrupts = <RK_PC7 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "host-wake";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_host_wake>;
+		brcm,ccode-map-trivial;
+	};
 };
 
 &uart1 {
