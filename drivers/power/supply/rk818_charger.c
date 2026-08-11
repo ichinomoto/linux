@@ -3,8 +3,8 @@
  * Battery and charger monitor for the Rockchip RK818 PMIC
  *
  * The gauge conversion constants and register layout are derived from the
- * Rockchip BSP driver.  Charger programming follows the DM200 BSP defaults:
- * 1 A battery charge current and 4.2 V charge voltage.
+ * Rockchip BSP driver.  Charger programming follows the board battery data:
+ * the charge-current selector is taken from the monitored-battery node.
  */
 
 #include <linux/bitfield.h>
@@ -101,14 +101,50 @@ static int rk818_calibrate_voltage(struct rk818_charger *charger)
 	return 0;
 }
 
+static int rk818_charge_current_sel(int current_ua)
+{
+	switch (current_ua) {
+	case 1000000:
+		return RK818_CHRG_CTRL1_CUR_1000MA;
+	case 1200000:
+		return RK818_CHRG_CTRL1_CUR_1200MA;
+	case 1400000:
+		return RK818_CHRG_CTRL1_CUR_1400MA;
+	case 1600000:
+		return RK818_CHRG_CTRL1_CUR_1600MA;
+	case 1800000:
+		return RK818_CHRG_CTRL1_CUR_1800MA;
+	case 2000000:
+		return RK818_CHRG_CTRL1_CUR_2000MA;
+	case 2250000:
+		return RK818_CHRG_CTRL1_CUR_2250MA;
+	case 2400000:
+		return RK818_CHRG_CTRL1_CUR_2400MA;
+	case 2600000:
+		return RK818_CHRG_CTRL1_CUR_2600MA;
+	case 2800000:
+		return RK818_CHRG_CTRL1_CUR_2800MA;
+	case 3000000:
+		return RK818_CHRG_CTRL1_CUR_3000MA;
+	default:
+		return -EINVAL;
+	}
+}
+
 static int rk818_charger_init(struct rk818_charger *charger)
 {
+	int charge_current_sel;
 	int ret;
 
 	/*
-	 * Keep the DM200 BSP charger defaults.  The input limit is set to 3 A,
-	 * while the battery charge current is limited independently to 1 A.
+	 * The input limit is set to 3 A.  The battery charge current is selected
+	 * from the board-specific simple-battery description.
 	 */
+	charge_current_sel =
+		rk818_charge_current_sel(charger->constant_charge_current_max_ua);
+	if (charge_current_sel < 0)
+		return charge_current_sel;
+
 	ret = regmap_update_bits(charger->rk808->regmap, RK818_USB_CTRL_REG,
 				 RK818_USB_ILIM_SEL_MASK |
 				 RK818_USB_CHRG_CT_EN,
@@ -124,11 +160,11 @@ static int rk818_charger_init(struct rk818_charger *charger)
 				 RK818_CHRG_CTRL1_CUR_MASK,
 				 RK818_CHRG_CTRL1_EN |
 				 RK818_CHRG_CTRL1_VOL_4200 |
-				 RK818_CHRG_CTRL1_CUR_1000MA);
+				 charge_current_sel);
 	if (ret)
 		return ret;
 
-	/* These termination/timer values are the DM200 BSP defaults. */
+	/* These termination/timer values are shared by the DM200/DM250 BSP. */
 	ret = regmap_write(charger->rk808->regmap, RK818_CHRG_CTRL_REG2,
 			   0x0d);
 	if (ret)
@@ -568,11 +604,6 @@ static int rk818_charger_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "invalid voltage calibration data\n");
 
-	ret = rk818_charger_init(charger);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to initialize charger\n");
-
 	config.drv_data = charger;
 	config.fwnode = &node->fwnode;
 
@@ -587,6 +618,11 @@ static int rk818_charger_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "invalid monitored-battery data\n");
+
+	ret = rk818_charger_init(charger);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "failed to initialize charger\n");
 
 	charger->ac = devm_power_supply_register(&pdev->dev, &rk818_ac_desc,
 						 &config);
