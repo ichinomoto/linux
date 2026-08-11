@@ -62,7 +62,7 @@
 		voltage-max-design-microvolt = <4200000>;
 		constant-charge-current-max-microamp = <2800000>;
 		constant-charge-voltage-max-microvolt = <4200000>;
-		resistance-micro-ohms = <45000>;
+		factory-internal-resistance-micro-ohms = <45000>;
 		ocv-capacity-celsius = <20>;
 		ocv-capacity-table-0 =
 			<4200000 100>, <4137000 95>, <4103000 90>,
@@ -314,16 +314,16 @@
 				regulator-name = "vdd_arm";
 				regulator-always-on;
 				regulator-boot-on;
-				regulator-min-microvolt = <750000>;
-				regulator-max-microvolt = <1450000>;
+				regulator-min-microvolt = <700000>;
+				regulator-max-microvolt = <1500000>;
 			};
 
 			vdd_logic: DCDC_REG2 {
 				regulator-name = "vdd_logic";
 				regulator-always-on;
 				regulator-boot-on;
-				regulator-min-microvolt = <750000>;
-				regulator-max-microvolt = <1450000>;
+				regulator-min-microvolt = <700000>;
+				regulator-max-microvolt = <1500000>;
 			};
 
 			vcc_ddr: DCDC_REG3 {
