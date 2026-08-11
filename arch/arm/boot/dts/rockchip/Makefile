@@ -14,6 +14,7 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += \
 	rk3066a-rayeager.dtb \
 	rk3128-evb.dtb \
 	rk3128-pomera-dm200.dtb \
+	rk3128-pomera-dm250.dtb \
 	rk3128-xpi-3128.dtb \
 	rk3188-bqedison2qc.dtb \
 	rk3188-px3-evb.dtb \
