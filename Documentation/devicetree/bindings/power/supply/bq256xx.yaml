@@ -23,6 +23,7 @@ description: |
     - https://www.ti.com/lit/ds/symlink/bq25611d.pdf
     - https://www.ti.com/lit/ds/symlink/bq25618.pdf
     - https://www.ti.com/lit/ds/symlink/bq25619.pdf
+    - https://www.ti.com/lit/ds/symlink/bq25620.pdf
 
 properties:
   compatible:
@@ -34,6 +35,7 @@ properties:
       - ti,bq25611d
       - ti,bq25618
       - ti,bq25619
+      - ti,bq25620
 
   reg:
     maxItems: 1
@@ -44,13 +46,52 @@ properties:
       Watchdog timer in ms. 0 (default) disables the watchdog
     minimum: 0
     maximum: 160000
-    enum: [ 0, 40000, 80000, 160000]
+
+  charge-current-limit-microamp:
+    description: |
+      Fast charge current limit in µA for the bq25620
+    minimum: 0
+    maximum: 3520000
+
+  charge-voltage-limit-microvolt:
+    description: |
+      Battery regulation voltage in µV for the bq25620
+    minimum: 3500000
+    maximum: 4800000
+
+  pre-charge-control-microamp:
+    description: |
+      Precharge current limit in µA for the bq25620
+    minimum: 20000
+    maximum: 620000
+
+  termination-control-microamp:
+    description: |
+      Charge termination current limit in µA for the bq25620
+    minimum: 10000
+    maximum: 620000
+
+  IOTG-regulation-microamp:
+    description: |
+      OTG current regulation limit in µA for the bq25620
+    minimum: 100000
+    maximum: 2400000
+
+  VOTG-regulation-microvolt:
+    description: |
+      OTG voltage regulation limit in µV for the bq25620
+    minimum: 3840000
+    maximum: 9600000
+
+  minimal-system-voltage-microvolt:
+    description: |
+      Minimum system voltage in µV for the bq25620
+    minimum: 2560000
+    maximum: 3840000
 
   input-voltage-limit-microvolt:
     description: |
-       Minimum input voltage limit in µV with a 100000 µV step
-    minimum: 3900000
-    maximum: 5400000
+       Minimum input voltage limit in µV
 
   input-current-limit-microamp:
     description: |
@@ -77,6 +118,24 @@ required:
 
 allOf:
   - $ref: power-supply.yaml#
+  - if:
+      properties:
+        compatible:
+          const: ti,bq25620
+    then:
+      properties:
+        ti,watchdog-timeout-ms:
+          enum: [ 0, 50, 100, 200 ]
+        input-voltage-limit-microvolt:
+          minimum: 3800000
+          maximum: 16800000
+    else:
+      properties:
+        ti,watchdog-timeout-ms:
+          enum: [ 0, 40000, 80000, 160000 ]
+        input-voltage-limit-microvolt:
+          minimum: 3900000
+          maximum: 5400000
   - if:
       properties:
         compatible:

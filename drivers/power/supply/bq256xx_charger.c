@@ -149,6 +149,138 @@
 
 #define BQ256XX_REG_RST		BIT(7)
 
+/*
+ * The BQ25620 uses a different register map from the BQ25600/11/18/19
+ * parts handled above.  Its limit registers are 16-bit values at even
+ * addresses, while the control and status registers remain 8-bit.
+ * Keep the definitions separate so that adding BQ25620 does not change
+ * the existing variants' register accesses.
+ */
+#define BQ25620_CHARGE_CURRENT_LIMIT		0x02
+#define BQ25620_CHARGE_VOLTAGE_LIMIT		0x04
+#define BQ25620_INPUT_CURRENT_LIMIT		0x06
+#define BQ25620_INPUT_VOLTAGE_LIMIT		0x08
+#define BQ25620_IOTG_REGULATION			0x0a
+#define BQ25620_VOTG_REGULATION			0x0c
+#define BQ25620_MINIMAL_SYSTEM_VOLTAGE		0x0e
+#define BQ25620_PRECHARGE_CONTROL		0x10
+#define BQ25620_TERMINATION_CONTROL		0x12
+#define BQ25620_CHARGE_CONTROL_0		0x14
+#define BQ25620_CHARGE_TIMER_CONTROL		0x15
+#define BQ25620_CHARGER_CONTROL_1		0x16
+#define BQ25620_CHARGER_CONTROL_2		0x17
+#define BQ25620_CHARGER_CONTROL_3		0x18
+#define BQ25620_CHARGER_CONTROL_4		0x19
+#define BQ25620_NTC_CONTROL_0			0x1a
+#define BQ25620_NTC_CONTROL_1			0x1b
+#define BQ25620_NTC_CONTROL_2			0x1c
+#define BQ25620_CHARGER_STATUS_0		0x1d
+#define BQ25620_CHARGER_STATUS_1		0x1e
+#define BQ25620_FAULT_STATUS_0			0x1f
+#define BQ25620_CHARGER_FLAG_0			0x20
+#define BQ25620_CHARGER_FLAG_1			0x21
+#define BQ25620_FAULT_FLAG_0			0x22
+#define BQ25620_CHARGER_MASK_0			0x23
+#define BQ25620_CHARGER_MASK_1			0x24
+#define BQ25620_FAULT_MASK_0			0x25
+#define BQ25620_ADC_CONTROL			0x26
+#define BQ25620_ADC_FUNCTION_DISABLE_0	0x27
+#define BQ25620_PART_INFORMATION		0x38
+
+#define BQ25620_IINDPM_MASK		GENMASK(11, 4)
+#define BQ25620_IINDPM_STEP_uA		20000
+#define BQ25620_IINDPM_MIN_uA		100000
+#define BQ25620_IINDPM_MAX_uA		3200000
+#define BQ25620_IINDPM_DEF_uA		3200000
+#define BQ25620_IINDPM_SHIFT		4
+
+#define BQ25620_VINDPM_MASK		GENMASK(13, 5)
+#define BQ25620_VINDPM_STEP_uV		40000
+#define BQ25620_VINDPM_MIN_uV		3800000
+#define BQ25620_VINDPM_MAX_uV		16800000
+#define BQ25620_VINDPM_DEF_uV		4600000
+#define BQ25620_VINDPM_SHIFT		5
+
+#define BQ25620_VBATREG_MASK		GENMASK(11, 3)
+#define BQ25620_VBATREG_STEP_uV		10000
+#define BQ25620_VBATREG_MIN_uV		3500000
+#define BQ25620_VBATREG_MAX_uV		4800000
+#define BQ25620_VBATREG_DEF_uV		4200000
+#define BQ25620_VBATREG_SHIFT		3
+
+#define BQ25620_EN_CHG_MASK		BIT(5)
+#define BQ25620_EN_CHG_SHIFT		5
+
+#define BQ25620_ITERM_MASK		GENMASK(8, 3)
+#define BQ25620_ITERM_STEP_uA		10000
+#define BQ25620_ITERM_MIN_uA		10000
+#define BQ25620_ITERM_MAX_uA		620000
+#define BQ25620_ITERM_DEF_uA		60000
+#define BQ25620_ITERM_SHIFT		3
+
+#define BQ25620_IPRECHG_MASK		GENMASK(8, 4)
+#define BQ25620_IPRECHG_STEP_uA		20000
+#define BQ25620_IPRECHG_MIN_uA		20000
+#define BQ25620_IPRECHG_MAX_uA		620000
+#define BQ25620_IPRECHG_DEF_uA		100000
+#define BQ25620_IPRECHG_SHIFT		4
+
+#define BQ25620_ICHG_MASK		GENMASK(11, 6)
+#define BQ25620_ICHG_STEP_uA		80000
+#define BQ25620_ICHG_MIN_uA		0
+#define BQ25620_ICHG_MAX_uA		3520000
+#define BQ25620_ICHG_DEF_uA		1040000
+#define BQ25620_ICHG_SHIFT		6
+
+#define BQ25620_IOTG_MASK		GENMASK(11, 4)
+#define BQ25620_IOTG_STEP_uA		20000
+#define BQ25620_IOTG_MIN_uA		100000
+#define BQ25620_IOTG_MAX_uA		2400000
+#define BQ25620_IOTG_DEF_uA		1000000
+#define BQ25620_IOTG_SHIFT		4
+
+#define BQ25620_VOTG_MASK		GENMASK(12, 6)
+#define BQ25620_VOTG_STEP_uV		80000
+#define BQ25620_VOTG_MIN_uV		3840000
+#define BQ25620_VOTG_MAX_uV		9600000
+#define BQ25620_VOTG_DEF_uV		5040000
+#define BQ25620_VOTG_SHIFT		6
+
+#define BQ25620_VSYSMIN_MASK		GENMASK(11, 6)
+#define BQ25620_VSYSMIN_STEP_uV		80000
+#define BQ25620_VSYSMIN_MIN_uV		2560000
+#define BQ25620_VSYSMIN_MAX_uV		3840000
+#define BQ25620_VSYSMIN_DEF_uV		3520000
+#define BQ25620_VSYSMIN_SHIFT		6
+
+#define BQ25620_VBUS_STAT_MASK		GENMASK(2, 0)
+#define BQ25620_CHG_STAT_MASK		GENMASK(4, 3)
+#define BQ25620_WDT_FAULT		BIT(0)
+#define BQ25620_BAT_FAULT		BIT(6)
+#define BQ25620_SAFETY_TIMER_FAULT	BIT(3)
+#define BQ25620_TSHUT_FAULT		BIT(1)
+
+#define BQ25620_WATCHDOG_MASK		GENMASK(1, 0)
+#define BQ25620_WATCHDOG_MAX		200
+#define BQ25620_WATCHDOG_DIS		0
+#define BQ25620_WATCHDOG_SHIFT		0
+
+#define BQ25620_CONV_STRN_MASK		GENMASK(3, 2)
+#define BQ25620_CONV_STRN_WEAK		0
+#define BQ25620_CONV_STRN_SHIFT		2
+#define BQ25620_EXT_LIM_MASK		BIT(2)
+#define BQ25620_EXT_LIM_DISABLE		0
+#define BQ25620_CHG_RATE_MASK		GENMASK(1, 0)
+#define BQ25620_CHG_RATE_6C		3
+#define BQ25620_TS_TH4_6_MASK		GENMASK(4, 2)
+#define BQ25620_TS_TH4_6_35_40_60	0
+#define BQ25620_TS_TH4_6_SHIFT		2
+#define BQ25620_ADC_SAMPLE_MASK		GENMASK(5, 4)
+#define BQ25620_ADC_SAMPLE_10BIT		2
+#define BQ25620_ADC_SAMPLE_SHIFT		4
+#define BQ25620_TS_IGNORE		BIT(7)
+#define BQ25620_TS_IGNORE_SHIFT		7
+
 /**
  * struct bq256xx_init_data -
  * @ichg: fast charge current
@@ -157,6 +289,9 @@
  * @iterm: termination current
  * @iprechg: precharge current
  * @vindpm: input voltage limit
+ * @iotg: OTG current regulation limit
+ * @votg: OTG voltage regulation limit
+ * @vsysmin: minimum system voltage
  * @ichg_max: maximum fast charge current
  * @vbatreg_max: maximum charge voltage
  * @ts_ignore: TS_IGNORE flag
@@ -168,6 +303,9 @@ struct bq256xx_init_data {
 	u32 iterm;
 	u32 iprechg;
 	u32 vindpm;
+	u32 iotg;
+	u32 votg;
+	u32 vsysmin;
 	u32 ichg_max;
 	u32 vbatreg_max;
 	bool ts_ignore;
@@ -203,6 +341,7 @@ enum bq256xx_id {
 	BQ25618,
 	BQ25619,
 	BQ25611D,
+	BQ25620,
 };
 
 /**
@@ -320,6 +459,10 @@ static int bq256xx_watchdog_time[BQ256XX_NUM_WD_VAL] = {
 	0, 40000, 80000, 1600000
 };
 
+static int bq25620_watchdog_time[BQ256XX_NUM_WD_VAL] = {
+	0, 50, 100, 200
+};
+
 static const int bq25611d_vbatreg_values[] = {
 	3494000, 3590000, 3686000, 3790000, 3894000, 3990000, 4090000, 4140000,
 	4190000
@@ -424,12 +567,318 @@ static const struct reg_default bq25618_619_reg_defs[] = {
 	{BQ256XX_CHARGER_CONTROL_4, 0x75},
 };
 
+/* BQ25620 limit registers are accessed as two-byte raw values. */
+static int bq256xx_regmap_update_bits_raw(struct regmap *map,
+		unsigned int reg, unsigned int mask, unsigned int val,
+		size_t val_len, bool *change)
+{
+	unsigned int orig = 0;
+	unsigned int tmp;
+	int ret;
+
+	ret = regmap_raw_read(map, reg, &orig, val_len);
+	if (ret)
+		return ret;
+
+	tmp = (orig & ~mask) | (val & mask);
+	if (tmp == orig) {
+		*change = false;
+		return 0;
+	}
+
+	*change = true;
+	return regmap_raw_write(map, reg, &tmp, val_len);
+}
+
+static int bq25620_get_state(struct bq256xx_device *bq,
+				struct bq256xx_state *state)
+{
+	unsigned int charger_status_0;
+	unsigned int charger_status_1;
+	unsigned int fault_status_0;
+	unsigned int fault_flag_0;
+	unsigned int vbus_stat;
+	unsigned int chg_stat;
+	int ret;
+
+	ret = regmap_read(bq->regmap, BQ25620_CHARGER_STATUS_0,
+				  &charger_status_0);
+	if (ret)
+		return ret;
+
+	ret = regmap_read(bq->regmap, BQ25620_CHARGER_STATUS_1,
+				  &charger_status_1);
+	if (ret)
+		return ret;
+
+	ret = regmap_read(bq->regmap, BQ25620_FAULT_STATUS_0,
+				  &fault_status_0);
+	if (ret)
+		return ret;
+
+	ret = regmap_read(bq->regmap, BQ25620_FAULT_FLAG_0,
+				  &fault_flag_0);
+	if (ret)
+		return ret;
+
+	/* Normalize the BQ25620's low-bit status fields to the common format. */
+	vbus_stat = charger_status_1 & BQ25620_VBUS_STAT_MASK;
+	switch (vbus_stat) {
+	case 1:
+		state->vbus_stat = BQ256XX_VBUS_STAT_USB_SDP;
+		break;
+	case 2:
+		state->vbus_stat = BQ256XX_VBUS_STAT_USB_CDP;
+		break;
+	case 3:
+		state->vbus_stat = BQ256XX_VBUS_STAT_USB_DCP;
+		break;
+	case 7:
+		state->vbus_stat = BQ256XX_VBUS_STAT_USB_OTG;
+		break;
+	default:
+		state->vbus_stat = BQ256XX_VBUS_STAT_NO_INPUT;
+		break;
+	}
+
+	chg_stat = (charger_status_1 & BQ25620_CHG_STAT_MASK) >> 3;
+	switch (chg_stat) {
+	case 1:
+		state->chrg_stat = BQ256XX_CHRG_STAT_PRECHRGING;
+		break;
+	case 2:
+		state->chrg_stat = BQ256XX_CHRG_STAT_FAST_CHRGING;
+		break;
+	case 3:
+		state->chrg_stat = BQ256XX_CHRG_STAT_CHRG_TERM;
+		break;
+	default:
+		state->chrg_stat = BQ256XX_CHRG_STAT_NOT_CHRGING;
+		break;
+	}
+
+	/* VBUS fault status/flag are active when either register reports it. */
+	state->online = !(fault_flag_0 & BIT(7)) &&
+		!(fault_status_0 & BIT(7));
+	state->wdt_fault = charger_status_0 & BQ25620_WDT_FAULT;
+	state->bat_fault = fault_status_0 & BQ25620_BAT_FAULT;
+	if (fault_status_0 & BQ25620_SAFETY_TIMER_FAULT)
+		state->chrg_fault = BQ256XX_CHRG_FAULT_CST_EXPIRE;
+	else if (charger_status_0 & BQ25620_TSHUT_FAULT)
+		state->chrg_fault = BQ256XX_CHRG_FAULT_THERM;
+	else
+		state->chrg_fault = BQ256XX_CHRG_FAULT_NORMAL;
+	state->ntc_fault = fault_status_0 & BQ256XX_NTC_FAULT_MASK;
+
+	return 0;
+}
+
+static int bq25620_set_charge_type(struct bq256xx_device *bq, int type)
+{
+	int enable;
+
+	switch (type) {
+	case POWER_SUPPLY_CHARGE_TYPE_NONE:
+		enable = 0;
+		break;
+	case POWER_SUPPLY_CHARGE_TYPE_TRICKLE:
+	case POWER_SUPPLY_CHARGE_TYPE_FAST:
+		enable = 1;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_1,
+				 BQ25620_EN_CHG_MASK,
+				 enable << BQ25620_EN_CHG_SHIFT);
+}
+
+static int bq25620_get_ichg_curr(struct bq256xx_device *bq)
+{
+	unsigned int reg_val = 0;
+	int ret;
+
+	ret = regmap_raw_read(bq->regmap, BQ25620_CHARGE_CURRENT_LIMIT,
+				      &reg_val, 2);
+	if (ret)
+		return ret;
+
+	return ((reg_val & BQ25620_ICHG_MASK) >> BQ25620_ICHG_SHIFT) *
+		BQ25620_ICHG_STEP_uA;
+}
+
+static int bq25620_set_ichg_curr(struct bq256xx_device *bq, int ichg)
+{
+	unsigned int reg_val;
+	int ichg_max = bq->init_data.ichg_max ?: BQ25620_ICHG_MAX_uA;
+	bool change;
+
+	ichg = clamp(ichg, BQ25620_ICHG_MIN_uA, ichg_max);
+	reg_val = (ichg / BQ25620_ICHG_STEP_uA) << BQ25620_ICHG_SHIFT;
+
+	return bq256xx_regmap_update_bits_raw(bq->regmap,
+					BQ25620_CHARGE_CURRENT_LIMIT,
+					BQ25620_ICHG_MASK, reg_val, 2, &change);
+}
+
+static int bq25620_get_chrg_volt(struct bq256xx_device *bq)
+{
+	unsigned int reg_val = 0;
+	int ret;
+
+	ret = regmap_raw_read(bq->regmap, BQ25620_CHARGE_VOLTAGE_LIMIT,
+				      &reg_val, 2);
+	if (ret)
+		return ret;
+
+	return ((reg_val & BQ25620_VBATREG_MASK) >> BQ25620_VBATREG_SHIFT) *
+		BQ25620_VBATREG_STEP_uV;
+}
+
+static int bq25620_set_chrg_volt(struct bq256xx_device *bq, int vbatreg)
+{
+	unsigned int reg_val;
+	int vbatreg_max = bq->init_data.vbatreg_max ?: BQ25620_VBATREG_MAX_uV;
+	bool change;
+
+	vbatreg = clamp(vbatreg, BQ25620_VBATREG_MIN_uV, vbatreg_max);
+	reg_val = (vbatreg / BQ25620_VBATREG_STEP_uV) <<
+		BQ25620_VBATREG_SHIFT;
+
+	return bq256xx_regmap_update_bits_raw(bq->regmap,
+					BQ25620_CHARGE_VOLTAGE_LIMIT,
+					BQ25620_VBATREG_MASK, reg_val, 2, &change);
+}
+
+static int bq25620_set_ts_ignore(struct bq256xx_device *bq, bool ts_ignore)
+{
+	return regmap_update_bits(bq->regmap, BQ25620_NTC_CONTROL_0,
+				 BQ25620_TS_IGNORE,
+				 (ts_ignore ? 1 : 0) << BQ25620_TS_IGNORE_SHIFT);
+}
+
+static int bq25620_get_prechrg_curr(struct bq256xx_device *bq)
+{
+	unsigned int reg_val = 0;
+	int ret;
+
+	ret = regmap_raw_read(bq->regmap, BQ25620_PRECHARGE_CONTROL,
+				      &reg_val, 2);
+	if (ret)
+		return ret;
+
+	return ((reg_val & BQ25620_IPRECHG_MASK) >> BQ25620_IPRECHG_SHIFT) *
+		BQ25620_IPRECHG_STEP_uA;
+}
+
+static int bq25620_set_prechrg_curr(struct bq256xx_device *bq, int iprechg)
+{
+	unsigned int reg_val;
+	bool change;
+
+	iprechg = clamp(iprechg, BQ25620_IPRECHG_MIN_uA,
+			BQ25620_IPRECHG_MAX_uA);
+	reg_val = (iprechg / BQ25620_IPRECHG_STEP_uA) <<
+		BQ25620_IPRECHG_SHIFT;
+
+	return bq256xx_regmap_update_bits_raw(bq->regmap,
+					BQ25620_PRECHARGE_CONTROL,
+					BQ25620_IPRECHG_MASK, reg_val, 2, &change);
+}
+
+static int bq25620_get_term_curr(struct bq256xx_device *bq)
+{
+	unsigned int reg_val = 0;
+	int ret;
+
+	ret = regmap_raw_read(bq->regmap, BQ25620_TERMINATION_CONTROL,
+				      &reg_val, 2);
+	if (ret)
+		return ret;
+
+	return ((reg_val & BQ25620_ITERM_MASK) >> BQ25620_ITERM_SHIFT) *
+		BQ25620_ITERM_STEP_uA;
+}
+
+static int bq25620_set_term_curr(struct bq256xx_device *bq, int iterm)
+{
+	unsigned int reg_val;
+	bool change;
+
+	iterm = clamp(iterm, BQ25620_ITERM_MIN_uA, BQ25620_ITERM_MAX_uA);
+	reg_val = (iterm / BQ25620_ITERM_STEP_uA) << BQ25620_ITERM_SHIFT;
+
+	return bq256xx_regmap_update_bits_raw(bq->regmap,
+					BQ25620_TERMINATION_CONTROL,
+					BQ25620_ITERM_MASK, reg_val, 2, &change);
+}
+
+static int bq25620_get_input_volt_lim(struct bq256xx_device *bq)
+{
+	unsigned int reg_val = 0;
+	int ret;
+
+	ret = regmap_raw_read(bq->regmap, BQ25620_INPUT_VOLTAGE_LIMIT,
+				      &reg_val, 2);
+	if (ret)
+		return ret;
+
+	return ((reg_val & BQ25620_VINDPM_MASK) >> BQ25620_VINDPM_SHIFT) *
+		BQ25620_VINDPM_STEP_uV;
+}
+
+static int bq25620_set_input_volt_lim(struct bq256xx_device *bq, int vindpm)
+{
+	unsigned int reg_val;
+	bool change;
+
+	vindpm = clamp(vindpm, BQ25620_VINDPM_MIN_uV, BQ25620_VINDPM_MAX_uV);
+	reg_val = (vindpm / BQ25620_VINDPM_STEP_uV) << BQ25620_VINDPM_SHIFT;
+
+	return bq256xx_regmap_update_bits_raw(bq->regmap,
+					BQ25620_INPUT_VOLTAGE_LIMIT,
+					BQ25620_VINDPM_MASK, reg_val, 2, &change);
+}
+
+static int bq25620_get_input_curr_lim(struct bq256xx_device *bq)
+{
+	unsigned int reg_val = 0;
+	int ret;
+
+	ret = regmap_raw_read(bq->regmap, BQ25620_INPUT_CURRENT_LIMIT,
+				      &reg_val, 2);
+	if (ret)
+		return ret;
+
+	return ((reg_val & BQ25620_IINDPM_MASK) >> BQ25620_IINDPM_SHIFT) *
+		BQ25620_IINDPM_STEP_uA;
+}
+
+static int bq25620_set_input_curr_lim(struct bq256xx_device *bq, int iindpm)
+{
+	unsigned int reg_val;
+	bool change;
+
+	iindpm = clamp(iindpm, BQ25620_IINDPM_MIN_uA,
+			BQ25620_IINDPM_MAX_uA);
+	reg_val = (iindpm / BQ25620_IINDPM_STEP_uA) <<
+		BQ25620_IINDPM_SHIFT;
+
+	return bq256xx_regmap_update_bits_raw(bq->regmap,
+					BQ25620_INPUT_CURRENT_LIMIT,
+					BQ25620_IINDPM_MASK, reg_val, 2, &change);
+}
+
 static int bq256xx_get_state(struct bq256xx_device *bq,
 				struct bq256xx_state *state)
 {
 	unsigned int charger_status_0;
 	unsigned int charger_status_1;
 	int ret;
+
+	if (bq->chip_info->model_id == BQ25620)
+		return bq25620_get_state(bq, state);
 
 	ret = regmap_read(bq->regmap, BQ256XX_CHARGER_STATUS_0,
 						&charger_status_0);
@@ -889,7 +1338,9 @@ static void bq256xx_charger_reset(void *data)
 {
 	struct bq256xx_device *bq = data;
 
-	regmap_update_bits(bq->regmap, BQ256XX_PART_INFORMATION,
+	regmap_update_bits(bq->regmap,
+				bq->chip_info->model_id == BQ25620 ?
+				BQ25620_CHARGER_CONTROL_2 : BQ256XX_PART_INFORMATION,
 					BQ256XX_REG_RST, BQ256XX_REG_RST);
 
 	if (!IS_ERR_OR_NULL(bq->usb2_phy))
@@ -1017,7 +1468,7 @@ static int bq256xx_get_charger_property(struct power_supply *psy,
 		} else if (state.bat_fault) {
 			val->intval = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
 		} else {
-			switch (state.chrg_stat) {
+			switch (state.chrg_fault) {
 			case BQ256XX_CHRG_FAULT_INPUT:
 				val->intval =
 					POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
@@ -1310,6 +1761,15 @@ static const struct regmap_config bq25618_619_regmap_config = {
 	.volatile_reg = bq256xx_is_volatile_reg,
 };
 
+static const struct regmap_config bq25620_regmap_config = {
+	.reg_bits = 8,
+	.val_bits = 8,
+
+	.max_register = BQ25620_PART_INFORMATION,
+	/* BQ25620 has mixed 8-bit and raw 16-bit registers. */
+	.cache_type = REGCACHE_NONE,
+};
+
 static const struct bq256xx_chip_info bq256xx_chip_info_tbl[] = {
 	[BQ25600] = {
 		.model_id = BQ25600,
@@ -1534,6 +1994,38 @@ static const struct bq256xx_chip_info bq256xx_chip_info_tbl[] = {
 
 		.has_usb_detect = false,
 	},
+
+	[BQ25620] = {
+		.model_id = BQ25620,
+		.bq256xx_regmap_config = &bq25620_regmap_config,
+		.bq256xx_get_ichg = bq25620_get_ichg_curr,
+		.bq256xx_get_iindpm = bq25620_get_input_curr_lim,
+		.bq256xx_get_vbatreg = bq25620_get_chrg_volt,
+		.bq256xx_get_iterm = bq25620_get_term_curr,
+		.bq256xx_get_iprechg = bq25620_get_prechrg_curr,
+		.bq256xx_get_vindpm = bq25620_get_input_volt_lim,
+
+		.bq256xx_set_ichg = bq25620_set_ichg_curr,
+		.bq256xx_set_iindpm = bq25620_set_input_curr_lim,
+		.bq256xx_set_vbatreg = bq25620_set_chrg_volt,
+		.bq256xx_set_iterm = bq25620_set_term_curr,
+		.bq256xx_set_iprechg = bq25620_set_prechrg_curr,
+		.bq256xx_set_vindpm = bq25620_set_input_volt_lim,
+		.bq256xx_set_charge_type = bq25620_set_charge_type,
+		.bq256xx_set_ts_ignore = bq25620_set_ts_ignore,
+
+		.bq256xx_def_ichg = BQ25620_ICHG_DEF_uA,
+		.bq256xx_def_iindpm = BQ25620_IINDPM_DEF_uA,
+		.bq256xx_def_vbatreg = BQ25620_VBATREG_DEF_uV,
+		.bq256xx_def_iterm = BQ25620_ITERM_DEF_uA,
+		.bq256xx_def_iprechg = BQ25620_IPRECHG_DEF_uA,
+		.bq256xx_def_vindpm = BQ25620_VINDPM_DEF_uV,
+
+		.bq256xx_max_ichg = BQ25620_ICHG_MAX_uA,
+		.bq256xx_max_vbatreg = BQ25620_VBATREG_MAX_uV,
+
+		.has_usb_detect = false,
+	},
 };
 
 static int bq256xx_power_supply_init(struct bq256xx_device *bq,
@@ -1557,12 +2049,136 @@ static int bq256xx_power_supply_init(struct bq256xx_device *bq,
 	return 0;
 }
 
+static int bq25620_hw_init(struct bq256xx_device *bq)
+{
+	int wd_reg_val = BQ25620_WATCHDOG_DIS;
+	int ret;
+	int i;
+	unsigned int val;
+	bool change;
+
+	for (i = 0; i < BQ256XX_NUM_WD_VAL; i++) {
+		if (bq->watchdog_timer == bq25620_watchdog_time[i]) {
+			wd_reg_val = i;
+			break;
+		}
+		if (i + 1 < BQ256XX_NUM_WD_VAL &&
+		    bq->watchdog_timer > bq25620_watchdog_time[i] &&
+		    bq->watchdog_timer < bq25620_watchdog_time[i + 1])
+			wd_reg_val = i;
+	}
+
+	ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_1,
+				 BQ25620_WATCHDOG_MASK,
+				 wd_reg_val << BQ25620_WATCHDOG_SHIFT);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(bq->regmap, BQ25620_CHARGE_TIMER_CONTROL,
+				 BIT(6), 0);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_2,
+				 BQ25620_CONV_STRN_MASK,
+					 BQ25620_CONV_STRN_WEAK <<
+					 BQ25620_CONV_STRN_SHIFT);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_4,
+				 BQ25620_EXT_LIM_MASK,
+					 BQ25620_EXT_LIM_DISABLE);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_4,
+				 BQ25620_CHG_RATE_MASK,
+					 BQ25620_CHG_RATE_6C);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(bq->regmap, BQ25620_NTC_CONTROL_1,
+				 BQ25620_TS_TH4_6_MASK,
+					 BQ25620_TS_TH4_6_35_40_60 <<
+					 BQ25620_TS_TH4_6_SHIFT);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(bq->regmap, BQ25620_ADC_CONTROL,
+				 BQ25620_ADC_SAMPLE_MASK,
+					 BQ25620_ADC_SAMPLE_10BIT <<
+					 BQ25620_ADC_SAMPLE_SHIFT);
+	if (ret)
+		return ret;
+
+	/* The BQ25620 hardware limits are independent of the gauge's limits. */
+	bq->init_data.ichg_max = BQ25620_ICHG_MAX_uA;
+	bq->init_data.vbatreg_max = BQ25620_VBATREG_MAX_uV;
+
+	ret = bq25620_set_input_volt_lim(bq, bq->init_data.vindpm);
+	if (ret)
+		return ret;
+
+	ret = bq25620_set_input_curr_lim(bq, bq->init_data.iindpm);
+	if (ret)
+		return ret;
+
+	ret = bq25620_set_ichg_curr(bq, bq->init_data.ichg);
+	if (ret)
+		return ret;
+
+	ret = bq25620_set_prechrg_curr(bq, bq->init_data.iprechg);
+	if (ret)
+		return ret;
+
+	ret = bq25620_set_chrg_volt(bq, bq->init_data.vbatreg);
+	if (ret)
+		return ret;
+
+	ret = bq25620_set_term_curr(bq, bq->init_data.iterm);
+	if (ret)
+		return ret;
+
+	val = clamp(bq->init_data.iotg ?: BQ25620_IOTG_DEF_uA,
+		    BQ25620_IOTG_MIN_uA, BQ25620_IOTG_MAX_uA);
+	val = (val / BQ25620_IOTG_STEP_uA) << BQ25620_IOTG_SHIFT;
+	ret = bq256xx_regmap_update_bits_raw(bq->regmap,
+					 BQ25620_IOTG_REGULATION,
+					 BQ25620_IOTG_MASK, val, 2, &change);
+	if (ret)
+		return ret;
+
+	val = clamp(bq->init_data.votg ?: BQ25620_VOTG_DEF_uV,
+		    BQ25620_VOTG_MIN_uV, BQ25620_VOTG_MAX_uV);
+	val = (val / BQ25620_VOTG_STEP_uV) << BQ25620_VOTG_SHIFT;
+	ret = bq256xx_regmap_update_bits_raw(bq->regmap,
+					 BQ25620_VOTG_REGULATION,
+					 BQ25620_VOTG_MASK, val, 2, &change);
+	if (ret)
+		return ret;
+
+	val = clamp(bq->init_data.vsysmin ?: BQ25620_VSYSMIN_DEF_uV,
+		    BQ25620_VSYSMIN_MIN_uV, BQ25620_VSYSMIN_MAX_uV);
+	val = (val / BQ25620_VSYSMIN_STEP_uV) << BQ25620_VSYSMIN_SHIFT;
+	ret = bq256xx_regmap_update_bits_raw(bq->regmap,
+					 BQ25620_MINIMAL_SYSTEM_VOLTAGE,
+					 BQ25620_VSYSMIN_MASK, val, 2, &change);
+	if (ret)
+		return ret;
+
+	return bq25620_set_ts_ignore(bq, bq->init_data.ts_ignore);
+}
+
 static int bq256xx_hw_init(struct bq256xx_device *bq)
 {
 	struct power_supply_battery_info *bat_info;
 	int wd_reg_val = BQ256XX_WATCHDOG_DIS;
 	int ret = 0;
 	int i;
+
+	if (bq->chip_info->model_id == BQ25620)
+		return bq25620_hw_init(bq);
 
 	for (i = 0; i < BQ256XX_NUM_WD_VAL; i++) {
 		if (bq->watchdog_timer == bq256xx_watchdog_time[i]) {
@@ -1651,10 +2267,90 @@ static int bq256xx_hw_init(struct bq256xx_device *bq)
 	return 0;
 }
 
+static int bq25620_parse_dt(struct bq256xx_device *bq,
+		struct power_supply_config *psy_cfg, struct device *dev)
+{
+	int ret;
+
+	psy_cfg->drv_data = bq;
+	psy_cfg->fwnode = dev_fwnode(dev);
+
+	ret = device_property_read_u32(bq->dev, "ti,watchdog-timeout-ms",
+				       &bq->watchdog_timer);
+	if (ret)
+		bq->watchdog_timer = BQ25620_WATCHDOG_DIS;
+
+	if (bq->watchdog_timer > BQ25620_WATCHDOG_MAX ||
+	    bq->watchdog_timer < BQ25620_WATCHDOG_DIS)
+		return -EINVAL;
+
+	ret = device_property_read_u32(bq->dev,
+				       "charge-current-limit-microamp",
+				       &bq->init_data.ichg);
+	if (ret)
+		bq->init_data.ichg = BQ25620_ICHG_DEF_uA;
+
+	ret = device_property_read_u32(bq->dev,
+				       "charge-voltage-limit-microvolt",
+				       &bq->init_data.vbatreg);
+	if (ret)
+		bq->init_data.vbatreg = BQ25620_VBATREG_DEF_uV;
+
+	ret = device_property_read_u32(bq->dev,
+				       "input-voltage-limit-microvolt",
+				       &bq->init_data.vindpm);
+	if (ret)
+		bq->init_data.vindpm = BQ25620_VINDPM_DEF_uV;
+
+	ret = device_property_read_u32(bq->dev,
+				       "input-current-limit-microamp",
+				       &bq->init_data.iindpm);
+	if (ret)
+		bq->init_data.iindpm = BQ25620_IINDPM_DEF_uA;
+
+	ret = device_property_read_u32(bq->dev, "IOTG-regulation-microamp",
+				       &bq->init_data.iotg);
+	if (ret)
+		bq->init_data.iotg = BQ25620_IOTG_DEF_uA;
+
+	ret = device_property_read_u32(bq->dev, "VOTG-regulation-microvolt",
+				       &bq->init_data.votg);
+	if (ret)
+		bq->init_data.votg = BQ25620_VOTG_DEF_uV;
+
+	ret = device_property_read_u32(bq->dev,
+				       "minimal-system-voltage-microvolt",
+				       &bq->init_data.vsysmin);
+	if (ret)
+		bq->init_data.vsysmin = BQ25620_VSYSMIN_DEF_uV;
+
+	ret = device_property_read_u32(bq->dev,
+				       "pre-charge-control-microamp",
+				       &bq->init_data.iprechg);
+	if (ret)
+		bq->init_data.iprechg = BQ25620_IPRECHG_DEF_uA;
+
+	ret = device_property_read_u32(bq->dev,
+				       "termination-control-microamp",
+				       &bq->init_data.iterm);
+	if (ret)
+		bq->init_data.iterm = BQ25620_ITERM_DEF_uA;
+
+	bq->init_data.ichg_max = BQ25620_ICHG_MAX_uA;
+	bq->init_data.vbatreg_max = BQ25620_VBATREG_MAX_uV;
+	bq->init_data.ts_ignore = device_property_read_bool(bq->dev,
+							"ti,no-thermistor");
+
+	return 0;
+}
+
 static int bq256xx_parse_dt(struct bq256xx_device *bq,
 		struct power_supply_config *psy_cfg, struct device *dev)
 {
 	int ret = 0;
+
+	if (bq->chip_info->model_id == BQ25620)
+		return bq25620_parse_dt(bq, psy_cfg, dev);
 
 	psy_cfg->drv_data = bq;
 	psy_cfg->fwnode = dev_fwnode(dev);
@@ -1776,6 +2472,7 @@ static const struct i2c_device_id bq256xx_i2c_ids[] = {
 	{ "bq25611d", (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25611D] },
 	{ "bq25618", (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25618] },
 	{ "bq25619", (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25619] },
+	{ "bq25620", (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25620] },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, bq256xx_i2c_ids);
@@ -1788,6 +2485,7 @@ static const struct of_device_id bq256xx_of_match[] = {
 	{ .compatible = "ti,bq25611d", .data = &bq256xx_chip_info_tbl[BQ25611D] },
 	{ .compatible = "ti,bq25618", .data = &bq256xx_chip_info_tbl[BQ25618] },
 	{ .compatible = "ti,bq25619", .data = &bq256xx_chip_info_tbl[BQ25619] },
+	{ .compatible = "ti,bq25620", .data = &bq256xx_chip_info_tbl[BQ25620] },
 	{}
 };
 MODULE_DEVICE_TABLE(of, bq256xx_of_match);
@@ -1800,6 +2498,7 @@ static const struct acpi_device_id bq256xx_acpi_match[] = {
 	{ "bq25611d", (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25611D] },
 	{ "bq25618", (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25618] },
 	{ "bq25619", (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25619] },
+	{ "bq25620", (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25620] },
 	{}
 };
 MODULE_DEVICE_TABLE(acpi, bq256xx_acpi_match);
