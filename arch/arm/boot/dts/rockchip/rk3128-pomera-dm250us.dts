@@ -356,7 +356,6 @@
 			keypad,num-columns = <11>;
 			keypad,num-rows = <8>;
 			wakeup-source;
-			linux,no-autorepeat;
 			linux,keymap =
 				<MATRIX_KEY(6, 9, KEY_ESC)>,
 				<MATRIX_KEY(7, 9, KEY_F1)>,
