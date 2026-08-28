@@ -421,8 +421,10 @@ static int tc3589x_keypad_probe(struct platform_device *pdev)
 	keypad->keymap = input->keycode;
 
 	input_set_capability(input, EV_MSC, MSC_SCAN);
-	if (!plat->no_autorepeat)
+	if (!plat->no_autorepeat) {
 		__set_bit(EV_REP, input->evbit);
+		input_enable_softrepeat(input, 250, 33);
+	}
 
 	input_set_drvdata(input, keypad);
 
