@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/mfd/tc3589x.h>
 #include <linux/device.h>
+#include <linux/of.h>
 
 /* Maximum supported keypad matrix row/columns size */
 #define TC3589x_MAX_KPROW               8
@@ -100,6 +101,8 @@ struct tc3589x_keypad_platform_data {
  * @kcol:	number of columns
  * @keymap:     matrix scan code table for keycodes
  * @keypad_stopped: holds keypad status
+ * @read_key_state: use KBDCODE snapshots instead of the event FIFO
+ * @key_state: previously reported matrix state
  */
 struct tc_keypad {
 	struct tc3589x *tc3589x;
@@ -109,6 +112,8 @@ struct tc_keypad {
 	unsigned int kcol;
 	unsigned short *keymap;
 	bool keypad_stopped;
+	bool read_key_state;
+	u16 key_state[TC3589x_MAX_KPROW];
 };
 
 static int tc3589x_keypad_init_key_hardware(struct tc_keypad *keypad)
@@ -185,6 +190,79 @@ static int tc3589x_keypad_init_key_hardware(struct tc_keypad *keypad)
 #define TC35893_KEYCODE_FIFO_EMPTY	0x7f
 #define TC35893_KEYCODE_FIFO_CLEAR	0xff
 #define TC35893_KEYPAD_ROW_SHIFT	0x4
+#define TC3589x_KBDCODE0		0x0b
+#define TC3589x_KBDCODE_MULTIKEY	BIT(7)
+
+static bool tc3589x_keypad_modifier(unsigned short keycode)
+{
+	switch (keycode) {
+	case KEY_LEFTSHIFT:
+	case KEY_RIGHTSHIFT:
+	case KEY_LEFTCTRL:
+	case KEY_RIGHTCTRL:
+	case KEY_LEFTALT:
+	case KEY_RIGHTALT:
+	case KEY_LEFTMETA:
+	case KEY_RIGHTMETA:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void tc3589x_keypad_read_state(struct tc_keypad *keypad)
+{
+	u16 state[TC3589x_MAX_KPROW] = { 0 };
+	u8 keys[TC35893_DATA_REGS];
+	unsigned int i, row, col, code, pass;
+	int ret;
+
+	/* KBDIC is write-only. Clear before reading so a later scan stays pending. */
+	ret = tc3589x_reg_write(keypad->tc3589x, TC3589x_KBDIC,
+			       TC3589x_EVT_INT_CLR | TC3589x_KBD_INT_CLR);
+	if (ret < 0)
+		return;
+
+	/* Never turn a failed/partial read into spurious key releases. */
+	for (i = 0; i < ARRAY_SIZE(keys); i++) {
+		ret = tc3589x_reg_read(keypad->tc3589x, TC3589x_KBDCODE0 + i);
+		if (ret < 0)
+			return;
+		keys[i] = ret;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(keys); i++) {
+		code = keys[i] & KP_NO_VALID_KEY_MASK;
+		if (code == TC35893_KEYCODE_FIFO_EMPTY)
+			break;
+		row = code >> KP_ROW_SHIFT;
+		col = code & KP_EVCODE_COL_MASK;
+		if (row >= keypad->board->krow || col >= keypad->board->kcol)
+			return;
+		state[row] |= BIT(col);
+		/* Bit 7 is MULTIKEY here, not the FIFO's release flag. */
+		if (!(keys[i] & TC3589x_KBDCODE_MULTIKEY))
+			break;
+	}
+
+	/* Apply modifiers first, including simultaneous Shift + character presses. */
+	for (pass = 0; pass < 2; pass++) {
+		for (row = 0; row < keypad->board->krow; row++) {
+			for (col = 0; col < keypad->board->kcol; col++) {
+				if (!((state[row] ^ keypad->key_state[row]) & BIT(col)))
+					continue;
+				code = MATRIX_SCAN_CODE(row, col, TC35893_KEYPAD_ROW_SHIFT);
+				if (tc3589x_keypad_modifier(keypad->keymap[code]) != !pass)
+					continue;
+				input_event(keypad->input, EV_MSC, MSC_SCAN, code);
+				input_report_key(keypad->input, keypad->keymap[code],
+						 !!(state[row] & BIT(col)));
+			}
+		}
+	}
+	memcpy(keypad->key_state, state, sizeof(state));
+	input_sync(keypad->input);
+}
 
 static irqreturn_t tc3589x_keypad_irq(int irq, void *dev)
 {
@@ -192,6 +270,11 @@ static irqreturn_t tc3589x_keypad_irq(int irq, void *dev)
 	struct tc3589x *tc3589x = keypad->tc3589x;
 	u8 i, row_index, col_index, kbd_code, up;
 	u8 code;
+
+	if (keypad->read_key_state) {
+		tc3589x_keypad_read_state(keypad);
+		return IRQ_HANDLED;
+	}
 
 	for (i = 0; i < TC35893_DATA_REGS * 2; i++) {
 		kbd_code = tc3589x_reg_read(tc3589x, TC3589x_EVTCODE_FIFO);
@@ -248,8 +331,9 @@ static int tc3589x_keypad_enable(struct tc_keypad *keypad)
 	if (ret < 0)
 		return ret;
 
-	/* enable the IRQs */
-	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMSK, 0x0,
+	/* KBDCODE mode uses scan/key-loss IRQs and masks event FIFO IRQs. */
+	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMSK,
+				keypad->read_key_state ? 0xf : 0x0,
 					TC3589x_EVT_LOSS_INT | TC3589x_EVT_INT);
 	if (ret < 0)
 		return ret;
@@ -402,6 +486,8 @@ static int tc3589x_keypad_probe(struct platform_device *pdev)
 	keypad->board = plat;
 	keypad->input = input;
 	keypad->tc3589x = tc3589x;
+	/* Match the DM250 factory kernel and U-Boot's KBDCODE readout. */
+	keypad->read_key_state = of_machine_is_compatible("kingjim,pomera-dm250");
 
 	input->id.bustype = BUS_I2C;
 	input->name = pdev->name;
