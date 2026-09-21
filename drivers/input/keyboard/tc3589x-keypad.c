@@ -70,6 +70,10 @@
 #define TC3589x_EVT_INT_CLR	0x2
 #define TC3589x_KBD_INT_CLR	0x1
 
+static bool debug_key_state;
+module_param(debug_key_state, bool, 0600);
+MODULE_PARM_DESC(debug_key_state, "Log raw DM250 KBDCODE snapshots for diagnosis");
+
 /**
  * struct tc3589x_keypad_platform_data - platform specific keypad data
  * @keymap_data:        matrix scan code table for keycodes
@@ -230,6 +234,10 @@ static void tc3589x_keypad_read_state(struct tc_keypad *keypad)
 			return;
 		keys[i] = ret;
 	}
+
+	if (debug_key_state)
+		dev_info(keypad->tc3589x->dev, "DM250 KBDCODE: %*ph\n",
+			 (int)sizeof(keys), keys);
 
 	for (i = 0; i < ARRAY_SIZE(keys); i++) {
 		code = keys[i] & KP_NO_VALID_KEY_MASK;
@@ -408,7 +416,7 @@ tc3589x_keypad_of_probe(struct device *dev)
 	struct device_node *np = dev->of_node;
 	struct tc3589x_keypad_platform_data *plat;
 	u32 cols, rows;
-	u32 debounce_ms;
+	u32 debounce_ms = 0;
 
 	if (!np)
 		return ERR_PTR(-ENODEV);

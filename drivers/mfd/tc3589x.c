@@ -431,6 +431,20 @@ static int tc3589x_probe(struct i2c_client *i2c)
 	if (ret)
 		return ret;
 
+	if (of_machine_is_compatible("kingjim,pomera-dm250")) {
+		/*
+		 * Restore the factory/U-Boot scan clock after the hardware reset.
+		 * CLKCFG must be written with module clocks disabled, before any
+		 * child can enable them. The reset default is eight times faster.
+		 */
+		ret = tc3589x_reg_write(tc3589x, TC3589x_CLKEN, 0);
+		if (ret < 0)
+			return ret;
+		ret = tc3589x_reg_write(tc3589x, TC3589x_CLKCFG, 0x43);
+		if (ret < 0)
+			return ret;
+	}
+
 	ret = tc3589x_irq_init(tc3589x, np);
 	if (ret)
 		return ret;
