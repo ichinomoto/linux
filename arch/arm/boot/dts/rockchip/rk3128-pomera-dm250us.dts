@@ -351,7 +351,7 @@
 
 		keypad {
 			compatible = "toshiba,tc3589x-keypad";
-			debounce-delay-ms = <50>;
+			/* Use the driver's 0xa3 debounce default, as in U-Boot. */
 			interrupts = <6>;
 			keypad,num-columns = <11>;
 			keypad,num-rows = <8>;

@@ -431,7 +431,9 @@ static int tc3589x_probe(struct i2c_client *i2c)
 	if (ret)
 		return ret;
 
-	if (of_machine_is_compatible("kingjim,pomera-dm250")) {
+	if (of_machine_is_compatible("kingjim,pomera-dm200") ||
+	    of_machine_is_compatible("kingjim,pomera-dm250") ||
+	    of_machine_is_compatible("kingjim,pomera-dm250us")) {
 		/*
 		 * Restore the factory/U-Boot scan clock after the hardware reset.
 		 * CLKCFG must be written with module clocks disabled, before any
