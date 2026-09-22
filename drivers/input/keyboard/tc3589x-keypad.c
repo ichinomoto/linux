@@ -105,6 +105,8 @@ struct tc3589x_keypad_platform_data {
  * @kcol:	number of columns
  * @keymap:     matrix scan code table for keycodes
  * @keypad_stopped: holds keypad status
+ * @suspended: keypad was stopped by the suspend callback
+ * @wake_enabled: suspend enabled the keypad wake IRQ
  * @read_key_state: use KBDCODE snapshots instead of the event FIFO
  * @key_state: previously reported matrix state
  */
@@ -116,6 +118,8 @@ struct tc_keypad {
 	unsigned int kcol;
 	unsigned short *keymap;
 	bool keypad_stopped;
+	bool suspended;
+	bool wake_enabled;
 	bool read_key_state;
 	u16 key_state[TC3589x_MAX_KPROW];
 };
@@ -314,6 +318,8 @@ static irqreturn_t tc3589x_keypad_irq(int irq, void *dev)
 	return IRQ_HANDLED;
 }
 
+static int tc3589x_keypad_disable(struct tc_keypad *keypad);
+
 static int tc3589x_keypad_enable(struct tc_keypad *keypad)
 {
 	struct tc3589x *tc3589x = keypad->tc3589x;
@@ -322,32 +328,44 @@ static int tc3589x_keypad_enable(struct tc_keypad *keypad)
 	/* pull the keypad module out of reset */
 	ret = tc3589x_set_bits(tc3589x, TC3589x_RSTCTRL, TC3589x_KBDRST, 0x0);
 	if (ret < 0)
-		return ret;
+		goto err_disable;
 
 	/* configure KBDMFS */
 	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMFS, 0x0, TC3589x_KBDMFS_EN);
 	if (ret < 0)
-		return ret;
+		goto err_disable;
 
 	/* enable the keypad clock */
 	ret = tc3589x_set_bits(tc3589x, TC3589x_CLKEN, 0x0, KPD_CLK_EN);
 	if (ret < 0)
-		return ret;
+		goto err_disable;
+
+	/* Reset loses the scan configuration, including debounce and pull-ups. */
+	ret = tc3589x_keypad_init_key_hardware(keypad);
+	if (ret < 0)
+		goto err_disable;
+
+	memset(keypad->key_state, 0, sizeof(keypad->key_state));
 
 	/* clear pending IRQs */
 	ret =  tc3589x_set_bits(tc3589x, TC3589x_RSTINTCLR, 0x0, 0x1);
 	if (ret < 0)
-		return ret;
+		goto err_disable;
 
 	/* KBDCODE mode uses scan/key-loss IRQs and masks event FIFO IRQs. */
 	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMSK,
-				keypad->read_key_state ? 0xf : 0x0,
-					TC3589x_EVT_LOSS_INT | TC3589x_EVT_INT);
+					0xf,
+						TC3589x_EVT_LOSS_INT | TC3589x_EVT_INT);
 	if (ret < 0)
-		return ret;
+		goto err_disable;
 
 	keypad->keypad_stopped = false;
 
+	return ret;
+
+err_disable:
+	if (tc3589x_keypad_disable(keypad))
+		dev_err(&keypad->input->dev, "failed to stop keypad after enable error\n");
 	return ret;
 }
 
@@ -363,8 +381,7 @@ static int tc3589x_keypad_disable(struct tc_keypad *keypad)
 		return ret;
 
 	/* disable all interrupts */
-	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMSK,
-			~(TC3589x_EVT_LOSS_INT | TC3589x_EVT_INT), 0x0);
+	ret = tc3589x_set_bits(tc3589x, TC3589x_KBDMSK, 0xf, 0xf);
 	if (ret < 0)
 		return ret;
 
@@ -374,7 +391,10 @@ static int tc3589x_keypad_disable(struct tc_keypad *keypad)
 		return ret;
 
 	/* put the keypad module into reset */
-	ret = tc3589x_set_bits(tc3589x, TC3589x_RSTCTRL, TC3589x_KBDRST, 0x1);
+	ret = tc3589x_set_bits(tc3589x, TC3589x_RSTCTRL,
+				TC3589x_KBDRST, TC3589x_KBDRST);
+	if (ret < 0)
+		return ret;
 
 	keypad->keypad_stopped = true;
 
@@ -390,12 +410,6 @@ static int tc3589x_keypad_open(struct input_dev *input)
 	error = tc3589x_keypad_enable(keypad);
 	if (error < 0) {
 		dev_err(&input->dev, "failed to enable keypad module\n");
-		return error;
-	}
-
-	error = tc3589x_keypad_init_key_hardware(keypad);
-	if (error < 0) {
-		dev_err(&input->dev, "failed to configure keypad module\n");
 		return error;
 	}
 
@@ -522,7 +536,9 @@ static int tc3589x_keypad_probe(struct platform_device *pdev)
 
 	input_set_drvdata(input, keypad);
 
-	tc3589x_keypad_disable(keypad);
+	error = tc3589x_keypad_disable(keypad);
+	if (error)
+		return error;
 
 	error = devm_request_threaded_irq(&pdev->dev, irq,
 					  NULL, tc3589x_keypad_irq,
@@ -555,16 +571,31 @@ static int tc3589x_keypad_suspend(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct tc_keypad *keypad = platform_get_drvdata(pdev);
 	int irq = platform_get_irq(pdev, 0);
+	int ret;
 
-	/* keypad is already off; we do nothing */
-	if (keypad->keypad_stopped)
+	guard(mutex)(&keypad->input->mutex);
+
+	/* Keep a wake reference left by a failed resume balanced as well. */
+	if (keypad->keypad_stopped || keypad->wake_enabled)
 		return 0;
 
-	/* if device is not a wakeup source, disable it for powersave */
-	if (!device_may_wakeup(&pdev->dev))
-		tc3589x_keypad_disable(keypad);
-	else
-		enable_irq_wake(irq);
+	if (device_may_wakeup(dev)) {
+		ret = enable_irq_wake(irq);
+		if (ret)
+			return ret;
+		keypad->wake_enabled = true;
+	} else {
+		disable_irq(irq);
+		ret = tc3589x_keypad_disable(keypad);
+		if (ret) {
+			/* The PM core will not resume a device that failed suspend. */
+			if (tc3589x_keypad_enable(keypad))
+				dev_err(dev, "failed to restore keypad after suspend error\n");
+			enable_irq(irq);
+			return ret;
+		}
+		keypad->suspended = true;
+	}
 
 	return 0;
 }
@@ -574,15 +605,34 @@ static int tc3589x_keypad_resume(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct tc_keypad *keypad = platform_get_drvdata(pdev);
 	int irq = platform_get_irq(pdev, 0);
+	int ret;
 
-	if (!keypad->keypad_stopped)
+	guard(mutex)(&keypad->input->mutex);
+
+	/* Undo the action actually taken, even if wakeup policy has changed. */
+	if (keypad->wake_enabled) {
+		ret = disable_irq_wake(irq);
+		if (ret)
+			return ret;
+		keypad->wake_enabled = false;
+		disable_irq(irq);
+	} else if (keypad->suspended) {
+		ret = tc3589x_keypad_enable(keypad);
+		keypad->suspended = false;
+		if (ret) {
+			enable_irq(irq);
+			return ret;
+		}
+	} else {
 		return 0;
+	}
 
-	/* enable the device to resume normal operations */
-	if (!device_may_wakeup(&pdev->dev))
-		tc3589x_keypad_enable(keypad);
-	else
-		disable_irq_wake(irq);
+	/* The input core released held keys on suspend. Resample after resume. */
+	if (keypad->read_key_state) {
+		memset(keypad->key_state, 0, sizeof(keypad->key_state));
+		tc3589x_keypad_read_state(keypad);
+	}
+	enable_irq(irq);
 
 	return 0;
 }
