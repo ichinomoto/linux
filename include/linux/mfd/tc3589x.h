@@ -123,6 +123,7 @@ struct tc3589x {
 	struct device *dev;
 	struct i2c_client *i2c;
 	struct irq_domain *domain;
+	bool asleep;
 
 	int irq_base;
 	int num_gpio;

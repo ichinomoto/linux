@@ -208,13 +208,32 @@ again:
 	return IRQ_HANDLED;
 }
 
+static void tc3589x_irq_noop(struct irq_data *data)
+{
+}
+
+static int tc3589x_irq_set_wake(struct irq_data *data, unsigned int on)
+{
+	struct tc3589x *tc3589x = irq_data_get_irq_chip_data(data);
+
+	return irq_set_irq_wake(tc3589x->i2c->irq, on);
+}
+
+static struct irq_chip tc3589x_irq_chip = {
+	.name = "tc3589x",
+	.irq_ack = tc3589x_irq_noop,
+	.irq_mask = tc3589x_irq_noop,
+	.irq_unmask = tc3589x_irq_noop,
+	.irq_set_wake = tc3589x_irq_set_wake,
+};
+
 static int tc3589x_irq_map(struct irq_domain *d, unsigned int virq,
 				irq_hw_number_t hwirq)
 {
 	struct tc3589x *tc3589x = d->host_data;
 
 	irq_set_chip_data(virq, tc3589x);
-	irq_set_chip_and_handler(virq, &dummy_irq_chip,
+	irq_set_chip_and_handler(virq, &tc3589x_irq_chip,
 				handle_edge_irq);
 	irq_set_nested_thread(virq, 1);
 	irq_set_noprobe(virq);
@@ -479,12 +498,17 @@ static int tc3589x_suspend(struct device *dev)
 {
 	struct tc3589x *tc3589x = dev_get_drvdata(dev);
 	struct i2c_client *client = tc3589x->i2c;
-	int ret = 0;
+	int ret;
 
-	/* put the system to sleep mode */
-	if (!device_may_wakeup(&client->dev))
-		ret = tc3589x_reg_write(tc3589x, TC3589x_CLKMODE,
-				TC3589x_CLKMODE_MODCTL_SLEEP);
+	/* A child may need the scan clock even if parent wakeup is disabled. */
+	if (device_may_wakeup(dev) ||
+	    irqd_is_wakeup_set(irq_get_irq_data(client->irq)))
+		return 0;
+
+	ret = tc3589x_reg_write(tc3589x, TC3589x_CLKMODE,
+			      TC3589x_CLKMODE_MODCTL_SLEEP);
+	if (!ret)
+		tc3589x->asleep = true;
 
 	return ret;
 }
@@ -492,13 +516,15 @@ static int tc3589x_suspend(struct device *dev)
 static int tc3589x_resume(struct device *dev)
 {
 	struct tc3589x *tc3589x = dev_get_drvdata(dev);
-	struct i2c_client *client = tc3589x->i2c;
-	int ret = 0;
+	int ret;
 
-	/* enable the system into operation */
-	if (!device_may_wakeup(&client->dev))
-		ret = tc3589x_reg_write(tc3589x, TC3589x_CLKMODE,
-				TC3589x_CLKMODE_MODCTL_OPERATION);
+	if (!tc3589x->asleep)
+		return 0;
+
+	ret = tc3589x_reg_write(tc3589x, TC3589x_CLKMODE,
+			      TC3589x_CLKMODE_MODCTL_OPERATION);
+	if (!ret)
+		tc3589x->asleep = false;
 
 	return ret;
 }
