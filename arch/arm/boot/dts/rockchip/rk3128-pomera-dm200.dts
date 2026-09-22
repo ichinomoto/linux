@@ -528,6 +528,20 @@
 	};
 };
 
+&usb2phy {
+	status = "okay";
+};
+
+&usb2phy_otg {
+	status = "okay";
+};
+
+&usb_otg {
+	/* No VBUS source on Pomera: use externally powered USB devices. */
+	dr_mode = "host";
+	status = "okay";
+};
+
 &vop {
 	status = "okay";
 };
