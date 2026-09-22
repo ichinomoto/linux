@@ -187,6 +187,7 @@
 
 &gpu {
 	mali-supply = <&vdd_logic>;
+	status = "okay";
 };
 
 &i2c0 {
