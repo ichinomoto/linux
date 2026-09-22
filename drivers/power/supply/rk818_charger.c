@@ -251,6 +251,24 @@ static int rk818_read_charge_now(struct rk818_charger *charger, int *charge_uah)
 	return 0;
 }
 
+static int rk818_read_charge_full(struct rk818_charger *charger, int *charge_uah)
+{
+	u32 raw;
+	int ret;
+
+	ret = rk818_read_be32(charger, RK818_NEW_FCC_REG3, &raw);
+	if (ret)
+		return ret;
+
+	/* The BSP stores FCC in mAh with a one-unit validity marker. */
+	if (raw > 1 && raw - 1 <= INT_MAX / 1000)
+		*charge_uah = (raw - 1) * 1000;
+	else
+		*charge_uah = charger->charge_full_design_uah;
+
+	return 0;
+}
+
 static int rk818_read_supply_status(struct rk818_charger *charger,
 				    unsigned int *status)
 {
@@ -347,13 +365,26 @@ static int rk818_battery_health(struct rk818_charger *charger, int *health)
 
 static int rk818_battery_capacity(struct rk818_charger *charger, int *capacity)
 {
-	unsigned int soc;
+	int charge_now, charge_full;
 	int voltage_uv;
+	u64 percent;
 	int ret;
 
-	ret = regmap_read(charger->rk808->regmap, RK818_SOC_REG, &soc);
-	if (!ret && soc <= 100) {
-		*capacity = soc;
+	/*
+	 * SOC_REG is a software-saved display value, not a live gauge result.
+	 * Derive the percentage from the same coulomb counter and FCC as the
+	 * charge_now/charge_full properties, including on each monitor event.
+	 */
+	ret = rk818_read_charge_now(charger, &charge_now);
+	if (!ret) {
+		ret = rk818_read_charge_full(charger, &charge_full);
+		if (ret)
+			return ret;
+		if (charge_full <= 0)
+			return -ENODATA;
+
+		percent = DIV_ROUND_CLOSEST_ULL((u64)charge_now * 100, charge_full);
+		*capacity = min_t(u64, percent, 100);
 		return 0;
 	}
 
@@ -381,7 +412,6 @@ static int rk818_battery_get_property(struct power_supply *psy,
 {
 	struct rk818_charger *charger = power_supply_get_drvdata(psy);
 	unsigned int supply_status;
-	u32 raw;
 	int ret;
 
 	switch (property) {
@@ -403,11 +433,7 @@ static int rk818_battery_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 		return rk818_read_charge_now(charger, &value->intval);
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		ret = rk818_read_be32(charger, RK818_NEW_FCC_REG3, &raw);
-		if (!ret)
-			value->intval = raw > 1 ? (raw - 1) * 1000 :
-				charger->charge_full_design_uah;
-		return ret;
+		return rk818_read_charge_full(charger, &value->intval);
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		value->intval = charger->charge_full_design_uah;
 		return 0;
