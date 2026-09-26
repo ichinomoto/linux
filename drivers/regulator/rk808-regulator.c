@@ -909,6 +909,36 @@ static const struct regulator_ops rk808_reg_ops = {
 	.set_suspend_disable	= rk808_set_suspend_disable,
 };
 
+static int rk818_ldo4_get_voltage_sel(struct regulator_dev *rdev)
+{
+	int sel = regulator_get_voltage_sel_regmap(rdev);
+
+	if (sel < 0)
+		return sel;
+
+	/* LDO4 can contain an undocumented selector at boot. */
+	if (sel >= rdev->desc->n_voltages) {
+		dev_warn_once(&rdev->dev, "Invalid LDO4 voltage selector %#x\n", sel);
+		/* Let the regulator core initialize it from the board constraints. */
+		return -ENOTRECOVERABLE;
+	}
+
+	return sel;
+}
+
+static const struct regulator_ops rk818_ldo4_ops = {
+	.list_voltage		= regulator_list_voltage_linear,
+	.map_voltage		= regulator_map_voltage_linear,
+	.get_voltage_sel	= rk818_ldo4_get_voltage_sel,
+	.set_voltage_sel	= regulator_set_voltage_sel_regmap,
+	.enable			= regulator_enable_regmap,
+	.disable		= regulator_disable_regmap,
+	.is_enabled		= regulator_is_enabled_regmap,
+	.set_suspend_voltage	= rk808_set_suspend_voltage,
+	.set_suspend_enable	= rk808_set_suspend_enable,
+	.set_suspend_disable	= rk808_set_suspend_disable,
+};
+
 static const struct regulator_ops rk808_reg_ops_ranges = {
 	.list_voltage		= regulator_list_voltage_linear_range,
 	.map_voltage		= regulator_map_voltage_linear_range,
@@ -1805,9 +1835,9 @@ static const struct regulator_desc rk818_reg[] = {
 		.enable_time = 400,
 		.owner = THIS_MODULE,
 	},
-	RK8XX_DESC(RK818_ID_LDO4, "LDO_REG4", "vcc8", 1800, 3400, 100,
+	RK8XX_DESC_COM(RK818_ID_LDO4, "LDO_REG4", "vcc8", 1800, 3400, 100,
 		RK818_LDO4_ON_VSEL_REG, RK818_LDO_VSEL_MASK, RK818_LDO_EN_REG,
-		BIT(3), 400),
+		BIT(3), 0, 0, 400, &rk818_ldo4_ops),
 	RK8XX_DESC(RK818_ID_LDO5, "LDO_REG5", "vcc7", 1800, 3400, 100,
 		RK818_LDO5_ON_VSEL_REG, RK818_LDO_VSEL_MASK, RK818_LDO_EN_REG,
 		BIT(4), 400),
