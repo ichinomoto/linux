@@ -20,6 +20,7 @@
 
 #define RK818_MONITOR_INTERVAL_MS	5000
 #define RK818_GASCNT_PER_MAH		2390
+#define RK818_MIN_FCC_MAH			500
 
 enum rk818_charge_status {
 	RK818_CHARGE_OFF,
@@ -44,6 +45,7 @@ struct rk818_charger {
 	int voltage_k;
 	int voltage_b;
 	int charge_full_design_uah;
+	int charge_full_max_uah;
 	int voltage_min_design_uv;
 	int voltage_max_design_uv;
 	int constant_charge_current_max_ua;
@@ -260,11 +262,16 @@ static int rk818_read_charge_full(struct rk818_charger *charger, int *charge_uah
 	if (ret)
 		return ret;
 
-	/* The BSP stores FCC in mAh with a one-unit validity marker. */
-	if (raw > 1 && raw - 1 <= INT_MAX / 1000)
+	/* Reject implausible saved FCC before converting to uAh. */
+	if (raw > 1 && raw - 1 >= RK818_MIN_FCC_MAH &&
+	    raw - 1 <= charger->charge_full_max_uah / 1000) {
 		*charge_uah = (raw - 1) * 1000;
-	else
+	} else {
+		dev_warn_once(charger->dev,
+			      "invalid saved FCC %u, using design capacity %d uAh\n",
+			      raw, charger->charge_full_design_uah);
 		*charge_uah = charger->charge_full_design_uah;
+	}
 
 	return 0;
 }
@@ -551,6 +558,28 @@ static void rk818_put_of_node(void *data)
 	of_node_put(data);
 }
 
+static int rk818_read_fcc_limit(struct rk818_charger *charger,
+				struct device_node *node)
+{
+	u32 max_uah;
+	int ret;
+
+	charger->charge_full_max_uah = charger->charge_full_design_uah;
+	if (!of_find_property(node, "rockchip,charge-full-max-microamp-hours", NULL))
+		return 0;
+
+	ret = of_property_read_u32(node, "rockchip,charge-full-max-microamp-hours",
+				   &max_uah);
+	if (ret)
+		return ret;
+
+	if (max_uah < charger->charge_full_design_uah || max_uah > INT_MAX)
+		return -EINVAL;
+
+	charger->charge_full_max_uah = max_uah;
+	return 0;
+}
+
 static int rk818_read_battery_info(struct rk818_charger *charger)
 {
 	const struct power_supply_battery_ocv_table *table;
@@ -644,6 +673,11 @@ static int rk818_charger_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "invalid monitored-battery data\n");
+
+	ret = rk818_read_fcc_limit(charger, node);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "invalid maximum full-charge capacity\n");
 
 	ret = rk818_charger_init(charger);
 	if (ret)
