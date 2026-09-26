@@ -307,6 +307,7 @@
 
 		charger {
 			monitored-battery = <&battery>;
+			rockchip,charge-full-max-microamp-hours = <6380000>;
 		};
 
 		regulators {
