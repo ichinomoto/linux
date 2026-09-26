@@ -298,10 +298,9 @@
 	rk818: pmic@1c {
 		compatible = "rockchip,rk818";
 		reg = <0x1c>;
-		interrupt-parent = <&gpio3>;
-		interrupts = <RK_PC6 IRQ_TYPE_EDGE_FALLING>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&pmic_int>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <RK_PB1 IRQ_TYPE_LEVEL_LOW>;
+		/* Keep the factory IRQ declaration, but leave PB1 pinmux to UART1. */
 		system-power-controller;
 		wakeup-source;
 		#clock-cells = <1>;
@@ -451,12 +450,6 @@
 				<0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>,
 				<0 RK_PB4 RK_FUNC_GPIO &pcfg_pull_none>,
 				<0 RK_PB5 RK_FUNC_GPIO &pcfg_pull_none>;
-		};
-	};
-
-	pmic {
-		pmic_int: pmic-int {
-			rockchip,pins = <3 RK_PC6 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
