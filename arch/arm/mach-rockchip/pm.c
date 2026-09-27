@@ -307,6 +307,10 @@ void __init rockchip_suspend_init(void)
 	struct device_node *np;
 	int ret;
 
+	/* RK3128 currently uses s2idle; it has no platform suspend ops. */
+	if (of_machine_is_compatible("rockchip,rk3128"))
+		return;
+
 	np = of_find_matching_node_and_match(NULL, rockchip_pmu_of_device_ids,
 					     &match);
 	if (!match) {
