@@ -703,10 +703,12 @@ void rk8xx_shutdown(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(rk8xx_shutdown);
 
-int rk8xx_probe(struct device *dev, int variant, unsigned int irq, struct regmap *regmap)
+int rk8xx_probe(struct device *dev, int variant, unsigned int irq,
+		struct regmap *regmap, bool is_spi)
 {
 	struct rk808 *rk808;
 	const struct rk808_reg_data *pre_init_reg;
+	enum sys_off_mode power_off_mode = SYS_OFF_MODE_POWER_OFF;
 	const struct mfd_cell *cells;
 	int dual_support = 0;
 	int nr_pre_init_regs;
@@ -807,10 +809,20 @@ int rk8xx_probe(struct device *dev, int variant, unsigned int irq, struct regmap
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to add MFD devices\n");
 
+	/*
+	 * I2C backends support atomic transfers and can power off in the final
+	 * phase. A prepare-only handler is not recognized by kernel_can_power_off()
+	 * and may turn a power-off request into a halt instead.
+	 *
+	 * Keep the prepare phase for SPI: Rockchip SPI transfers still sleep.
+	 */
+	if (is_spi)
+		power_off_mode = SYS_OFF_MODE_POWER_OFF_PREPARE;
+
 	if (device_property_read_bool(dev, "system-power-controller") ||
 	    device_property_read_bool(dev, "rockchip,system-power-controller")) {
 		ret = devm_register_sys_off_handler(dev,
-				    SYS_OFF_MODE_POWER_OFF_PREPARE, SYS_OFF_PRIO_HIGH,
+				    power_off_mode, SYS_OFF_PRIO_HIGH,
 				    &rk808_power_off, rk808);
 		if (ret)
 			return dev_err_probe(dev, ret,
