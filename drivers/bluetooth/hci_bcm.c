@@ -1537,7 +1537,8 @@ static int bcm_serdev_probe(struct serdev_device *serdev)
 	if (err)
 		return err;
 
-	if (!bcmdev->shutdown) {
+	/* BT_RST_N also restores the initial baud rate across reopen/reprobe. */
+	if (!bcmdev->shutdown && !bcmdev->reset) {
 		dev_warn(&serdev->dev,
 			 "No reset resource, using default baud rate\n");
 		bcmdev->oper_speed = bcmdev->init_speed;

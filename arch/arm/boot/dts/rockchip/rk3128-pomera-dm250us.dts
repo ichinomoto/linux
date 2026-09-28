@@ -597,6 +597,7 @@
 
 	bluetooth {
 		compatible = "brcm,bcm43438-bt";
+		max-speed = <1500000>;
 		shutdown-gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_HIGH>;
 		device-wakeup-gpios = <&gpio3 RK_PD2 GPIO_ACTIVE_HIGH>;
 		interrupt-parent = <&gpio3>;
