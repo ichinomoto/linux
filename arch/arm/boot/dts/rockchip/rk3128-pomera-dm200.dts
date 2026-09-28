@@ -514,13 +514,14 @@
 /* The DM200 Bluetooth controller is attached to UART0. */
 &uart0 {
 	status = "okay";
-	/* Match the vendor tree: Bluetooth uses PIO at 115200 baud. */
+	/* Keep the vendor tree's PIO mode and use RTS/CTS flow control. */
 	dma-names = "!tx", "!rx";
 	pinctrl-0 = <&uart0_xfer &uart0_cts &uart0_rts>;
 	uart-has-rtscts;
 
 	bluetooth {
 		compatible = "brcm,bcm20702a1";
+		max-speed = <1500000>;
 		device-wakeup-gpios = <&gpio3 RK_PD2 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_LOW>;
 		interrupt-parent = <&gpio3>;
