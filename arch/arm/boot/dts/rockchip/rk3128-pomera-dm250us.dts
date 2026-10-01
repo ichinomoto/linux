@@ -123,6 +123,15 @@
 			wakeup-source;
 		};
 
+		lid-switch {
+			label = "Lid Switch";
+			linux,code = <SW_LID>;
+			linux,input-type = <EV_SW>;
+			gpios = <&gpio0 RK_PC4 GPIO_ACTIVE_LOW>;
+			debounce-interval = <100>;
+			wakeup-source;
+		};
+
 		left-shift {
 			label = "Left Shift";
 			linux,code = <KEY_LEFTSHIFT>;
@@ -485,6 +494,7 @@
 		dm250us_button_pins: dm250us-button-pins {
 			rockchip,pins =
 				<0 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>,
+				<0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>,
 				<0 RK_PB7 RK_FUNC_GPIO &pcfg_pull_none>,
 				<0 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>,
 				<0 RK_PB3 RK_FUNC_GPIO &pcfg_pull_none>,

@@ -107,6 +107,29 @@
 		};
 	};
 
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&dm200_button_pins>;
+
+		power-key {
+			label = "Power Button";
+			linux,code = <KEY_POWER>;
+			gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;
+			debounce-interval = <100>;
+			wakeup-source;
+		};
+
+		lid-switch {
+			label = "Lid Switch";
+			linux,code = <SW_LID>;
+			linux,input-type = <EV_SW>;
+			gpios = <&gpio0 RK_PC4 GPIO_ACTIVE_LOW>;
+			debounce-interval = <100>;
+			wakeup-source;
+		};
+	};
+
 	keyboard-modifiers {
 		compatible = "gpio-keys";
 		autorepeat;
@@ -420,6 +443,14 @@
 	pmic {
 		pmic_int: pmic-int {
 			rockchip,pins = <1 RK_PB1 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	buttons {
+		dm200_button_pins: dm200-button-pins {
+			rockchip,pins =
+				<0 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>,
+				<0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
