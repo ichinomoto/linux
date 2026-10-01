@@ -559,6 +559,9 @@
 	bluetooth {
 		compatible = "brcm,bcm43438-bt";
 		max-speed = <1500000>;
+		/* Keep the module supply alive when only Bluetooth is in use. */
+		vbat-supply = <&wifi_vcc>;
+		vddio-supply = <&wifi_vcc>;
 		shutdown-gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_HIGH>;
 		device-wakeup-gpios = <&gpio3 RK_PD2 GPIO_ACTIVE_HIGH>;
 		interrupt-parent = <&gpio3>;
