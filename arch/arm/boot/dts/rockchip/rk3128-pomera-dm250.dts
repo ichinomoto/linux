@@ -308,6 +308,9 @@
 		charger {
 			monitored-battery = <&battery>;
 			rockchip,charge-full-max-microamp-hours = <6380000>;
+			extcon = <&usb2phy>;
+			input-current-limit-microamp = <3000000>;
+			rockchip,charge-feedback-temperature-millicelsius = <105000>;
 		};
 
 		regulators {
@@ -582,6 +585,7 @@
 
 &usb2phy_otg {
 	status = "okay";
+	rockchip,host-charger-detection;
 };
 
 &usb_otg {
