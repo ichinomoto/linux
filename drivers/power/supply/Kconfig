@@ -826,6 +826,7 @@ config CHARGER_RK817
 config CHARGER_RK818
 	tristate "Rockchip RK818 PMIC battery and charger monitor"
 	depends on MFD_RK8XX
+	depends on EXTCON
 	help
 	  Say Y to include support for monitoring the battery and charger
 	  integrated into the Rockchip RK818 PMIC.

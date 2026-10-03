@@ -9,11 +9,13 @@
 
 #include <linux/bitfield.h>
 #include <linux/devm-helpers.h>
+#include <linux/extcon.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/rk808.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/unaligned.h>
@@ -21,6 +23,13 @@
 #define RK818_MONITOR_INTERVAL_MS	5000
 #define RK818_GASCNT_PER_MAH		2390
 #define RK818_MIN_FCC_MAH			500
+#define RK818_USB_INPUT_CURRENT_UA	450000
+#define RK818_THERMAL_FEEDBACK_MASK	GENMASK(3, 2)
+
+static const int rk818_input_currents[] = {
+	450000, 800000, 850000, 1000000, 1250000, 1500000,
+	1750000, 2000000, 2250000, 2500000, 2750000, 3000000,
+};
 
 enum rk818_charge_status {
 	RK818_CHARGE_OFF,
@@ -39,6 +48,8 @@ struct rk818_charger {
 	struct power_supply *battery;
 	struct power_supply *ac;
 	struct power_supply *usb;
+	struct extcon_dev *edev;
+	struct notifier_block cable_nb;
 	struct delayed_work work;
 	struct power_supply_battery_ocv_table *ocv_table;
 	int ocv_table_len;
@@ -50,6 +61,8 @@ struct rk818_charger {
 	int voltage_max_design_uv;
 	int constant_charge_current_max_ua;
 	int constant_charge_voltage_max_uv;
+	int input_current_max_ua;
+	u32 feedback_temp_mc;
 };
 
 static int rk818_read_be16(struct rk818_charger *charger, unsigned int reg,
@@ -133,15 +146,23 @@ static int rk818_charge_current_sel(int current_ua)
 	}
 }
 
+static int rk818_input_current_sel(int current_ua)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(rk818_input_currents); i++)
+		if (current_ua == rk818_input_currents[i])
+			return i;
+
+	return -EINVAL;
+}
+
 static int rk818_charger_init(struct rk818_charger *charger)
 {
 	int charge_current_sel;
 	int ret;
 
-	/*
-	 * The input limit is set to 3 A.  The battery charge current is selected
-	 * from the board-specific simple-battery description.
-	 */
+	/* Stay at the BSP's USB limit until the source has been classified. */
 	charge_current_sel =
 		rk818_charge_current_sel(charger->constant_charge_current_max_ua);
 	if (charge_current_sel < 0)
@@ -150,8 +171,16 @@ static int rk818_charger_init(struct rk818_charger *charger)
 	ret = regmap_update_bits(charger->rk808->regmap, RK818_USB_CTRL_REG,
 				 RK818_USB_ILIM_SEL_MASK |
 				 RK818_USB_CHRG_CT_EN,
-				 RK818_USB_ILIM_3000MA |
+				 rk818_input_current_sel(RK818_USB_INPUT_CURRENT_UA) |
 				 RK818_USB_CHRG_CT_EN);
+	if (ret)
+		return ret;
+
+	/* Only change the feedback field; preserve shutdown/other thermal bits. */
+	ret = regmap_update_bits(charger->rk808->regmap, RK818_THERMAL_REG,
+				 RK818_THERMAL_FEEDBACK_MASK,
+				 FIELD_PREP(RK818_THERMAL_FEEDBACK_MASK,
+					    (charger->feedback_temp_mc - 85000) / 10000));
 	if (ret)
 		return ret;
 
@@ -485,36 +514,109 @@ static const struct power_supply_desc rk818_battery_desc = {
 	.get_property = rk818_battery_get_property,
 };
 
+static enum power_supply_usb_type rk818_source_type(struct rk818_charger *charger)
+{
+	int sdp, cdp, dcp;
+
+	if (!charger->edev)
+		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
+
+	sdp = extcon_get_state(charger->edev, EXTCON_CHG_USB_SDP);
+	cdp = extcon_get_state(charger->edev, EXTCON_CHG_USB_CDP);
+	dcp = extcon_get_state(charger->edev, EXTCON_CHG_USB_DCP);
+	if (sdp < 0 || cdp < 0 || dcp < 0 || sdp + cdp + dcp != 1)
+		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
+	if (dcp)
+		return POWER_SUPPLY_USB_TYPE_DCP;
+	if (cdp)
+		return POWER_SUPPLY_USB_TYPE_CDP;
+
+	return POWER_SUPPLY_USB_TYPE_SDP;
+}
+
+static int rk818_update_input_limit(struct rk818_charger *charger)
+{
+	int current_ua = RK818_USB_INPUT_CURRENT_UA;
+	enum power_supply_usb_type type;
+	bool plugged;
+	int ret, read_ret;
+
+	read_ret = rk818_read_plugged(charger, &plugged);
+	if (!read_ret && plugged) {
+		type = rk818_source_type(charger);
+		if (type == POWER_SUPPLY_USB_TYPE_DCP)
+			current_ua = charger->input_current_max_ua;
+		else if (type == POWER_SUPPLY_USB_TYPE_CDP)
+			/* CDP is a USB data port; never exceed its 1.5 A limit. */
+			current_ua = min(charger->input_current_max_ua, 1500000);
+	}
+
+	ret = regmap_update_bits(charger->rk808->regmap, RK818_USB_CTRL_REG,
+				 RK818_USB_ILIM_SEL_MASK,
+				 rk818_input_current_sel(current_ua));
+	return ret ?: read_ret;
+}
+
+static int rk818_cable_changed(struct notifier_block *nb,
+			       unsigned long event, void *data)
+{
+	struct rk818_charger *charger =
+		container_of(nb, struct rk818_charger, cable_nb);
+
+	/* Extcon uses an atomic notifier: defer sleeping I2C operations. */
+	mod_delayed_work(system_freezable_wq, &charger->work, 0);
+	return NOTIFY_OK;
+}
+
 static int rk818_external_get_property(struct power_supply *psy,
 				       enum power_supply_property property,
 				       union power_supply_propval *value)
 {
 	struct rk818_charger *charger = power_supply_get_drvdata(psy);
+	enum power_supply_usb_type type;
+	unsigned int reg;
 	bool plugged;
 	int ret;
 
-	if (property != POWER_SUPPLY_PROP_ONLINE)
+	if (property == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT) {
+		ret = regmap_read(charger->rk808->regmap, RK818_USB_CTRL_REG, &reg);
+		if (ret)
+			return ret;
+		reg &= RK818_USB_ILIM_SEL_MASK;
+		if (reg >= ARRAY_SIZE(rk818_input_currents))
+			return -EINVAL;
+		value->intval = rk818_input_currents[reg];
+		return 0;
+	}
+
+	if (property != POWER_SUPPLY_PROP_ONLINE &&
+	    property != POWER_SUPPLY_PROP_USB_TYPE)
 		return -EINVAL;
 
 	ret = rk818_read_plugged(charger, &plugged);
 	if (ret)
 		return ret;
 
-	/*
-	 * RK818 cannot classify the source without the USB controller's DP/DM
-	 * result.  Preserve the DM200 BSP behaviour: report any external source
-	 * as AC and leave USB offline until that integration is implemented.
-	 */
-	if (psy == charger->usb)
-		value->intval = 0;
+	type = plugged ? rk818_source_type(charger) : POWER_SUPPLY_USB_TYPE_UNKNOWN;
+	if (property == POWER_SUPPLY_PROP_USB_TYPE)
+		value->intval = type;
+	else if (psy == charger->usb)
+		value->intval = plugged && type != POWER_SUPPLY_USB_TYPE_DCP;
 	else
-		value->intval = plugged;
+		value->intval = plugged && type == POWER_SUPPLY_USB_TYPE_DCP;
 
 	return 0;
 }
 
 static const enum power_supply_property rk818_external_properties[] = {
 	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+};
+
+static const enum power_supply_property rk818_usb_properties[] = {
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+	POWER_SUPPLY_PROP_USB_TYPE,
 };
 
 static const struct power_supply_desc rk818_ac_desc = {
@@ -528,8 +630,12 @@ static const struct power_supply_desc rk818_ac_desc = {
 static const struct power_supply_desc rk818_usb_desc = {
 	.name = "USB",
 	.type = POWER_SUPPLY_TYPE_USB,
-	.properties = rk818_external_properties,
-	.num_properties = ARRAY_SIZE(rk818_external_properties),
+	.properties = rk818_usb_properties,
+	.num_properties = ARRAY_SIZE(rk818_usb_properties),
+	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+		     BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_DCP),
 	.get_property = rk818_external_get_property,
 };
 
@@ -537,19 +643,32 @@ static void rk818_monitor_work(struct work_struct *work)
 {
 	struct rk818_charger *charger =
 		container_of(work, struct rk818_charger, work.work);
+	int ret;
+
+	ret = rk818_update_input_limit(charger);
+	if (ret)
+		dev_err_ratelimited(charger->dev, "input current update failed: %d\n", ret);
 
 	power_supply_changed(charger->battery);
 	power_supply_changed(charger->ac);
 	power_supply_changed(charger->usb);
-	queue_delayed_work(system_percpu_wq, &charger->work,
+	queue_delayed_work(system_freezable_wq, &charger->work,
 			   msecs_to_jiffies(RK818_MONITOR_INTERVAL_MS));
 }
 
 static irqreturn_t rk818_plug_irq(int irq, void *data)
 {
 	struct rk818_charger *charger = data;
+	int ret;
 
-	mod_delayed_work(system_percpu_wq, &charger->work, 0);
+	/* Drop a previous DCP limit before a new cable can be classified. */
+	ret = regmap_update_bits(charger->rk808->regmap, RK818_USB_CTRL_REG,
+				 RK818_USB_ILIM_SEL_MASK,
+				 rk818_input_current_sel(RK818_USB_INPUT_CURRENT_UA));
+	if (ret)
+		dev_err_ratelimited(charger->dev, "USB input limit reset failed: %d\n", ret);
+
+	mod_delayed_work(system_freezable_wq, &charger->work, 0);
 	return IRQ_HANDLED;
 }
 
@@ -623,6 +742,50 @@ out:
 	return ret;
 }
 
+static int rk818_read_charger_info(struct rk818_charger *charger,
+				   struct device_node *node)
+{
+	struct device_node *extcon_node;
+	u32 current_ua;
+	int ret;
+
+	/* Old DTs remain usable, but never assume an unknown source is 3 A. */
+	charger->input_current_max_ua = RK818_USB_INPUT_CURRENT_UA;
+	charger->feedback_temp_mc = 85000;
+	if (of_property_present(node, "input-current-limit-microamp")) {
+		ret = of_property_read_u32(node, "input-current-limit-microamp",
+					   &current_ua);
+		if (ret)
+			return ret;
+		if (current_ua > INT_MAX || rk818_input_current_sel(current_ua) < 0)
+			return -EINVAL;
+		charger->input_current_max_ua = current_ua;
+	}
+
+	if (of_property_present(node, "rockchip,charge-feedback-temperature-millicelsius")) {
+		ret = of_property_read_u32(node,
+				"rockchip,charge-feedback-temperature-millicelsius",
+				&charger->feedback_temp_mc);
+		if (ret)
+			return ret;
+		if (charger->feedback_temp_mc < 85000 || charger->feedback_temp_mc > 115000 ||
+		    (charger->feedback_temp_mc - 85000) % 10000)
+			return -EINVAL;
+	}
+
+	if (of_property_present(node, "extcon")) {
+		extcon_node = of_parse_phandle(node, "extcon", 0);
+		if (!extcon_node)
+			return -EINVAL;
+		charger->edev = extcon_find_edev_by_node(extcon_node);
+		of_node_put(extcon_node);
+		if (IS_ERR(charger->edev))
+			return PTR_ERR(charger->edev);
+	}
+
+	return 0;
+}
+
 static int rk818_charger_probe(struct platform_device *pdev)
 {
 	struct rk808 *rk808 = dev_get_drvdata(pdev->dev.parent);
@@ -679,6 +842,10 @@ static int rk818_charger_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "invalid maximum full-charge capacity\n");
 
+	ret = rk818_read_charger_info(charger, node);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "invalid charger limits or extcon\n");
+
 	ret = rk818_charger_init(charger);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
@@ -695,6 +862,21 @@ static int rk818_charger_probe(struct platform_device *pdev)
 	if (IS_ERR(charger->usb))
 		return dev_err_probe(&pdev->dev, PTR_ERR(charger->usb),
 				     "failed to register USB supply\n");
+
+	/* Initialize work before any IRQ/notifier can schedule it. */
+	ret = devm_delayed_work_autocancel(&pdev->dev, &charger->work,
+					   rk818_monitor_work);
+	if (ret)
+		return ret;
+
+	if (charger->edev) {
+		charger->cable_nb.notifier_call = rk818_cable_changed;
+		ret = devm_extcon_register_notifier_all(&pdev->dev, charger->edev,
+						      &charger->cable_nb);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret,
+					     "failed to register charger notifier\n");
+	}
 
 	plug_in_irq = platform_get_irq(pdev, 0);
 	if (plug_in_irq < 0)
@@ -718,21 +900,42 @@ static int rk818_charger_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "failed to request plug-out IRQ\n");
 
-	ret = devm_delayed_work_autocancel(&pdev->dev, &charger->work,
-					   rk818_monitor_work);
-	if (ret)
-		return ret;
-
-	mod_delayed_work(system_percpu_wq, &charger->work, 0);
+	mod_delayed_work(system_freezable_wq, &charger->work, 0);
 	dev_info(&pdev->dev, "RK818 battery monitor initialized\n");
 
 	return 0;
 }
 
+static int rk818_charger_suspend(struct device *dev)
+{
+	struct rk818_charger *charger = dev_get_drvdata(dev);
+
+	/* A new cable cannot be classified while the system is asleep. */
+	return regmap_update_bits(charger->rk808->regmap, RK818_USB_CTRL_REG,
+				  RK818_USB_ILIM_SEL_MASK,
+				  rk818_input_current_sel(RK818_USB_INPUT_CURRENT_UA));
+}
+
+static int rk818_charger_resume(struct device *dev)
+{
+	struct rk818_charger *charger = dev_get_drvdata(dev);
+	int ret;
+
+	ret = rk818_charger_init(charger);
+	if (ret)
+		return ret;
+	mod_delayed_work(system_freezable_wq, &charger->work, 0);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(rk818_charger_pm_ops,
+			      rk818_charger_suspend, rk818_charger_resume);
+
 static struct platform_driver rk818_charger_driver = {
 	.probe = rk818_charger_probe,
 	.driver = {
 		.name = "rk818-charger",
+		.pm = pm_sleep_ptr(&rk818_charger_pm_ops),
 	},
 };
 module_platform_driver(rk818_charger_driver);
