@@ -5,9 +5,11 @@
  * Copyright (C) 2016 Fuzhou Rockchip Electronics Co., Ltd
  */
 
+#include <linux/atomic.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/delay.h>
+#include <linux/devm-helpers.h>
 #include <linux/extcon-provider.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -20,6 +22,7 @@
 #include <linux/of_irq.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
@@ -203,6 +206,10 @@ struct rockchip_usb2phy_cfg {
  * @event_nb: hold event notification callback.
  * @state: define OTG enumeration states before device reset.
  * @mode: the dr_mode of the controller.
+ * @charger_detection: classify external VBUS with an unused host-only PHY.
+ * @host_chg_work: charger detection independent of the OTG state machine.
+ * @charger_cable: last charger-only extcon result.
+ * @charger_generation: VBUS edge counter, including changes during detection.
  */
 struct rockchip_usb2phy_port {
 	struct phy	*phy;
@@ -222,6 +229,10 @@ struct rockchip_usb2phy_port {
 	struct notifier_block	event_nb;
 	enum usb_otg_state	state;
 	enum usb_dr_mode	mode;
+	bool		charger_detection;
+	struct delayed_work host_chg_work;
+	unsigned int	charger_cable;
+	atomic_t	charger_generation;
 };
 
 /**
@@ -570,6 +581,24 @@ out:
 	return ret;
 }
 
+static void rockchip_usb2phy_charger_notify(struct rockchip_usb2phy *rphy,
+					  struct rockchip_usb2phy_port *rport,
+					  unsigned int cable)
+{
+	static const unsigned int cables[] = {
+		EXTCON_CHG_USB_SDP, EXTCON_CHG_USB_CDP, EXTCON_CHG_USB_DCP,
+	};
+	int i;
+
+	/* Clear the old classification before publishing a different source. */
+	for (i = 0; i < ARRAY_SIZE(cables); i++)
+		if (cables[i] != cable && extcon_get_state(rphy->edev, cables[i]) > 0)
+			extcon_set_state_sync(rphy->edev, cables[i], false);
+	if (cable && extcon_get_state(rphy->edev, cable) == 0)
+		extcon_set_state_sync(rphy->edev, cable, true);
+	rport->charger_cable = cable;
+}
+
 static int rockchip_usb2phy_power_on(struct phy *phy)
 {
 	struct rockchip_usb2phy_port *rport = phy_get_drvdata(phy);
@@ -578,6 +607,9 @@ static int rockchip_usb2phy_power_on(struct phy *phy)
 	int ret;
 
 	dev_dbg(&rport->phy->dev, "port power on\n");
+
+	if (rport->charger_detection)
+		rockchip_usb2phy_charger_notify(rphy, rport, EXTCON_NONE);
 
 	if (!rport->suspended)
 		return 0;
@@ -629,8 +661,205 @@ static int rockchip_usb2phy_power_off(struct phy *phy)
 
 	rport->suspended = true;
 	clk_disable_unprepare(rphy->clk480m);
+	if (rport->charger_detection)
+		mod_delayed_work(system_freezable_wq, &rport->host_chg_work, 0);
 
 	return 0;
+}
+
+static int rockchip_usb2phy_charger_read(struct regmap *map,
+				       const struct usb2phy_reg *reg, bool *enabled)
+{
+	unsigned int val;
+	int ret;
+
+	ret = regmap_read(map, reg->offset, &val);
+	if (ret)
+		return ret;
+	val = (val & GENMASK(reg->bitend, reg->bitstart)) >> reg->bitstart;
+	*enabled = val == reg->enable;
+	return 0;
+}
+
+/* Called with phy->mutex held, and only when its power_count is zero. */
+static int rockchip_usb2phy_host_charger_detect(struct rockchip_usb2phy *rphy,
+					      struct rockchip_usb2phy_port *rport,
+					      unsigned int *cable)
+{
+	const struct rockchip_chg_det_reg *det = &rphy->phy_cfg->chg_det;
+	struct regmap *base = get_reg_base(rphy);
+	unsigned int saved, mask, detect_mask;
+	bool contact = false, primary, secondary, vbus, id;
+	int ret, cleanup_ret, i;
+
+	*cable = EXTCON_NONE;
+	ret = regmap_read(base, rport->port_cfg->phy_sus.offset, &saved);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(rphy->clk480m);
+	if (ret)
+		return ret;
+
+	/* RK3128 only: BC1.2 source/sink controls occupy bits 7..12. */
+	detect_mask = GENMASK(12, 7);
+	ret = regmap_write(base, det->idp_src_en.offset, detect_mask << 16);
+	if (ret)
+		goto restore;
+	ret = property_enable(base, &rport->port_cfg->phy_sus, false);
+	if (ret)
+		goto restore;
+	/* Non-driving mode, with no USB controller or VBUS source enabled. */
+	ret = property_enable(base, &det->opmode, false);
+	if (ret)
+		goto restore;
+	usleep_range(1500, 2000);
+
+	ret = property_enable(base, &det->rdm_pdwn_en, true);
+	if (ret)
+		goto restore;
+	ret = property_enable(base, &det->idp_src_en, true);
+	if (ret)
+		goto restore;
+	for (i = 0; i < 6; i++) {
+		msleep(100);
+		ret = rockchip_usb2phy_charger_read(rphy->grf, &det->dp_det, &contact);
+		if (ret || contact)
+			break;
+	}
+	if (ret)
+		goto restore;
+	/* An unconnected data pair is not evidence of a high-current charger. */
+	if (!contact)
+		goto restore;
+	ret = property_enable(base, &det->rdm_pdwn_en, false);
+	if (ret)
+		goto restore;
+	ret = property_enable(base, &det->idp_src_en, false);
+	if (ret)
+		goto restore;
+	ret = property_enable(base, &det->vdp_src_en, true);
+	if (ret)
+		goto restore;
+	ret = property_enable(base, &det->idm_sink_en, true);
+	if (ret)
+		goto restore;
+	msleep(40);
+	ret = rockchip_usb2phy_charger_read(rphy->grf, &det->cp_det, &primary);
+	if (ret)
+		goto restore;
+	if (!primary) {
+		*cable = EXTCON_CHG_USB_SDP;
+		goto check_cable;
+	}
+	ret = property_enable(base, &det->vdp_src_en, false);
+	if (ret)
+		goto restore;
+	ret = property_enable(base, &det->idm_sink_en, false);
+	if (ret)
+		goto restore;
+	msleep(40);
+	ret = property_enable(base, &det->vdm_src_en, true);
+	if (ret)
+		goto restore;
+	ret = property_enable(base, &det->idp_sink_en, true);
+	if (ret)
+		goto restore;
+	msleep(40);
+	ret = rockchip_usb2phy_charger_read(rphy->grf, &det->dcp_det, &secondary);
+	if (ret)
+		goto restore;
+	*cable = secondary ? EXTCON_CHG_USB_DCP : EXTCON_CHG_USB_CDP;
+
+check_cable:
+	ret = rockchip_usb2phy_charger_read(rphy->grf, &rport->port_cfg->utmi_bvalid, &vbus);
+	if (ret)
+		goto restore;
+	ret = rockchip_usb2phy_charger_read(rphy->grf, &rport->port_cfg->utmi_id, &id);
+	if (ret)
+		goto restore;
+	if (!vbus || !id)
+		*cable = EXTCON_NONE;
+restore:
+	cleanup_ret = regmap_write(base, det->idp_src_en.offset, detect_mask << 16);
+	if (!ret)
+		ret = cleanup_ret;
+	mask = GENMASK(rport->port_cfg->phy_sus.bitend, rport->port_cfg->phy_sus.bitstart);
+	cleanup_ret = regmap_write(base, rport->port_cfg->phy_sus.offset,
+				   (mask << 16) | (saved & mask));
+	if (!ret)
+		ret = cleanup_ret;
+	clk_disable_unprepare(rphy->clk480m);
+	if (ret)
+		*cable = EXTCON_NONE;
+	return ret;
+}
+
+static void rockchip_usb2phy_host_charger_work(struct work_struct *work)
+{
+	struct rockchip_usb2phy_port *rport =
+		container_of(work, struct rockchip_usb2phy_port, host_chg_work.work);
+	struct rockchip_usb2phy *rphy = dev_get_drvdata(rport->phy->dev.parent);
+	unsigned int cable = EXTCON_NONE;
+	int generation;
+	bool vbus, id;
+	int ret = 0;
+
+	/* Serialize against generic PHY init/exit/power operations, including bind. */
+	mutex_lock(&rport->phy->mutex);
+	generation = atomic_read(&rport->charger_generation);
+	if (rport->phy->power_count)
+		goto notify;
+	ret = rockchip_usb2phy_charger_read(rphy->grf, &rport->port_cfg->utmi_bvalid, &vbus);
+	if (ret || !vbus)
+		goto notify;
+	ret = rockchip_usb2phy_charger_read(rphy->grf, &rport->port_cfg->utmi_id, &id);
+	if (ret || !id)
+		goto notify;
+	if (rport->charger_cable)
+		cable = rport->charger_cable;
+	else
+		ret = rockchip_usb2phy_host_charger_detect(rphy, rport, &cable);
+notify:
+	if (generation != atomic_read(&rport->charger_generation))
+		cable = EXTCON_NONE;
+	rockchip_usb2phy_charger_notify(rphy, rport, cable);
+	mutex_unlock(&rport->phy->mutex);
+	if (ret)
+		dev_err_ratelimited(rphy->dev, "charger-only detection failed: %d\n", ret);
+	queue_delayed_work(system_freezable_wq, &rport->host_chg_work,
+			   msecs_to_jiffies(2000));
+}
+
+static irqreturn_t rockchip_usb2phy_host_charger_irq(int irq, void *data)
+{
+	struct rockchip_usb2phy_port *rport = data;
+	struct rockchip_usb2phy *rphy = dev_get_drvdata(rport->phy->dev.parent);
+	bool pending;
+	int ret;
+
+	ret = rockchip_usb2phy_charger_read(rphy->grf,
+					 &rport->port_cfg->bvalid_det_st, &pending);
+	if (ret || !pending)
+		return IRQ_NONE;
+
+	/* Invalidate a detection before waiting for its PHY lock. */
+	atomic_inc(&rport->charger_generation);
+	ret = property_enable(rphy->grf, &rport->port_cfg->bvalid_det_clr, true);
+	if (ret)
+		dev_err_ratelimited(rphy->dev, "charger VBUS IRQ clear failed: %d\n", ret);
+	mutex_lock(&rport->phy->mutex);
+	rockchip_usb2phy_charger_notify(rphy, rport, EXTCON_NONE);
+	mutex_unlock(&rport->phy->mutex);
+	mod_delayed_work(system_freezable_wq, &rport->host_chg_work, 0);
+	return IRQ_HANDLED;
+}
+
+static void rockchip_usb2phy_host_charger_disable_irq(void *data)
+{
+	struct rockchip_usb2phy_port *rport = data;
+	struct rockchip_usb2phy *rphy = dev_get_drvdata(rport->phy->dev.parent);
+
+	property_enable(rphy->grf, &rport->port_cfg->bvalid_det_en, false);
 }
 
 static int rockchip_usb2phy_exit(struct phy *phy)
@@ -1280,6 +1509,40 @@ static int rockchip_otg_event(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
+static int rockchip_usb2phy_host_charger_init(struct rockchip_usb2phy *rphy,
+					   struct rockchip_usb2phy_port *rport,
+					   struct device_node *child_np)
+{
+	int ret;
+
+	if (!of_device_is_compatible(rphy->dev->of_node, "rockchip,rk3128-usb2phy") ||
+	    rport->mode != USB_DR_MODE_HOST ||
+	    of_property_present(rphy->dev->of_node, "extcon"))
+		return -EINVAL;
+	atomic_set(&rport->charger_generation, 0);
+	/* Independent of phy_init/exit: it must work after USB host unbind. */
+	ret = devm_delayed_work_autocancel(rphy->dev, &rport->host_chg_work,
+					 rockchip_usb2phy_host_charger_work);
+	if (ret)
+		return ret;
+	rport->bvalid_irq = of_irq_get_byname(child_np, "otg-bvalid");
+	if (rport->bvalid_irq <= 0)
+		return rport->bvalid_irq ?: -EINVAL;
+	ret = devm_request_threaded_irq(rphy->dev, rport->bvalid_irq, NULL,
+			rockchip_usb2phy_host_charger_irq, IRQF_ONESHOT,
+			"rockchip-usb-charger", rport);
+	if (ret)
+		return ret;
+	ret = devm_add_action_or_reset(rphy->dev,
+			rockchip_usb2phy_host_charger_disable_irq, rport);
+	if (ret)
+		return ret;
+	ret = property_enable(rphy->grf, &rport->port_cfg->bvalid_det_clr, true);
+	if (ret)
+		return ret;
+	return property_enable(rphy->grf, &rport->port_cfg->bvalid_det_en, true);
+}
+
 static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 					  struct rockchip_usb2phy_port *rport,
 					  struct device_node *child_np)
@@ -1302,6 +1565,10 @@ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 	mutex_init(&rport->mutex);
 
 	rport->mode = of_usb_get_dr_mode_by_phy(child_np, -1);
+	rport->charger_detection =
+		of_property_read_bool(child_np, "rockchip,host-charger-detection");
+	if (rport->charger_detection)
+		return rockchip_usb2phy_host_charger_init(rphy, rport, child_np);
 	if (rport->mode == USB_DR_MODE_HOST ||
 	    rport->mode == USB_DR_MODE_UNKNOWN) {
 		ret = 0;
@@ -1486,6 +1753,8 @@ next_child:
 	}
 
 	provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
+	if (IS_ERR(provider))
+		return PTR_ERR(provider);
 
 	if (rphy->irq > 0) {
 		ret = devm_request_threaded_irq(rphy->dev, rphy->irq, NULL,
@@ -1499,12 +1768,51 @@ next_child:
 		}
 	}
 
-	return PTR_ERR_OR_ZERO(provider);
+	for (index = 0; index < rphy->phy_cfg->num_ports; index++)
+		if (rphy->ports[index].charger_detection)
+			queue_delayed_work(system_freezable_wq,
+					   &rphy->ports[index].host_chg_work, 0);
+
+	return 0;
 
 put_child:
 	of_node_put(child_np);
 	return ret;
 }
+
+static int rockchip_usb2phy_charger_suspend(struct device *dev)
+{
+	struct rockchip_usb2phy *rphy = dev_get_drvdata(dev);
+	int i;
+
+	for (i = 0; i < rphy->phy_cfg->num_ports; i++) {
+		struct rockchip_usb2phy_port *rport = &rphy->ports[i];
+
+		if (!rport->charger_detection)
+			continue;
+		cancel_delayed_work_sync(&rport->host_chg_work);
+		mutex_lock(&rport->phy->mutex);
+		rockchip_usb2phy_charger_notify(rphy, rport, EXTCON_NONE);
+		mutex_unlock(&rport->phy->mutex);
+	}
+	return 0;
+}
+
+static int rockchip_usb2phy_charger_resume(struct device *dev)
+{
+	struct rockchip_usb2phy *rphy = dev_get_drvdata(dev);
+	int i;
+
+	for (i = 0; i < rphy->phy_cfg->num_ports; i++)
+		if (rphy->ports[i].charger_detection)
+			mod_delayed_work(system_freezable_wq,
+					 &rphy->ports[i].host_chg_work, 0);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(rockchip_usb2phy_charger_pm_ops,
+			      rockchip_usb2phy_charger_suspend,
+			      rockchip_usb2phy_charger_resume);
 
 static int rk3128_usb2phy_tuning(struct rockchip_usb2phy *rphy)
 {
@@ -2308,6 +2616,7 @@ static struct platform_driver rockchip_usb2phy_driver = {
 	.driver		= {
 		.name	= "rockchip-usb2phy",
 		.of_match_table = rockchip_usb2phy_dt_match,
+		.pm = pm_sleep_ptr(&rockchip_usb2phy_charger_pm_ops),
 	},
 };
 module_platform_driver(rockchip_usb2phy_driver);
