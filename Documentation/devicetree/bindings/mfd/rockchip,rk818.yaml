@@ -110,6 +110,27 @@ properties:
     $ref: /schemas/power/supply/power-supply.yaml
 
     properties:
+      extcon:
+        description:
+          Phandle to the USB PHY extcon reporting SDP, CDP and DCP classification.
+        maxItems: 1
+
+      input-current-limit-microamp:
+        description: Maximum input current for a detected dedicated charger.
+        enum: [450000, 800000, 850000, 1000000, 1250000, 1500000,
+               1750000, 2000000, 2250000, 2500000, 2750000, 3000000]
+
+      rockchip,charge-feedback-temperature-millicelsius:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description:
+          RK818 die temperature at which constant-temperature charging reduces
+          charge current. This is not the battery thermistor temperature.
+        enum: [85000, 95000, 105000, 115000]
+
+      rockchip,charge-full-max-microamp-hours:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: Maximum plausible full-charge capacity saved by the gauge.
+
       monitored-battery:
         description:
           Phandle to a simple-battery node containing the battery design and
