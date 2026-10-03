@@ -62,7 +62,7 @@
 		voltage-min-design-microvolt = <3350000>;
 		voltage-max-design-microvolt = <4200000>;
 		constant-charge-current-max-microamp = <1000000>;
-		constant-charge-voltage-max-microvolt = <4250000>;
+		constant-charge-voltage-max-microvolt = <4200000>;
 		ocv-capacity-celsius = <20>;
 		ocv-capacity-table-0 =
 			<4174000 100>, <4123000 95>, <4087000 90>,
@@ -304,6 +304,10 @@
 		charger {
 			monitored-battery = <&battery>;
 			rockchip,charge-full-max-microamp-hours = <4350000>;
+			extcon = <&usb2phy>;
+			input-current-limit-microamp = <1250000>;
+			/* The DM200 BSP leaves this at the RK818 reset threshold. */
+			rockchip,charge-feedback-temperature-millicelsius = <85000>;
 		};
 
 		regulators {
@@ -570,6 +574,7 @@
 
 &usb2phy_otg {
 	status = "okay";
+	rockchip,host-charger-detection;
 };
 
 &usb_otg {
