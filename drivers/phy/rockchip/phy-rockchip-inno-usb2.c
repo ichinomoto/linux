@@ -705,11 +705,15 @@ static int rockchip_usb2phy_host_charger_detect(struct rockchip_usb2phy *rphy,
 	ret = regmap_write(base, det->idp_src_en.offset, detect_mask << 16);
 	if (ret)
 		goto restore;
-	ret = property_enable(base, &rport->port_cfg->phy_sus, false);
-	if (ret)
-		goto restore;
-	/* Non-driving mode: the host data path is quiesced, with no VBUS source. */
-	ret = property_enable(base, &det->opmode, false);
+	/*
+	 * RK3128 UOC0_CON0: software control, suspend_n=1, opmode=01,
+	 * xcvrselect=01 and termselect=0, with both host pulldowns disabled.
+	 * The generic opmode value also asserts suspend_n=0 and selects HS;
+	 * do not use it while sampling the charger comparators.
+	 */
+	mask = GENMASK(rport->port_cfg->phy_sus.bitend, rport->port_cfg->phy_sus.bitstart);
+	ret = regmap_write(base, rport->port_cfg->phy_sus.offset,
+			   (mask << 16) | BIT(4) | BIT(2) | BIT(1) | BIT(0));
 	if (ret)
 		goto restore;
 	usleep_range(1500, 2000);
