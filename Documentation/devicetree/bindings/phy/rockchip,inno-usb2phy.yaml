@@ -112,9 +112,11 @@ properties:
         type: boolean
         description:
           Enable charger classification on an RK3128 host-only port when no
-          consumer has powered the PHY. Does not enable OTG role switching or
-          VBUS output. The provider must use its own extcon device. Unknown
-          sources and an active USB host are reported without a charger type.
+          consumer has powered the PHY, or when the consumer has quiesced its
+          empty host port and notified the PHY of disconnection. Does not
+          enable OTG role switching or VBUS output. The provider must use its
+          own extcon device. Unknown sources and connected USB data devices
+          are reported without a charger type.
 
       "#phy-cells":
         const: 0
