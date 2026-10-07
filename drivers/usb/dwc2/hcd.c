@@ -14,6 +14,8 @@
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/pm_runtime.h>
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
 #include <linux/io.h>
@@ -26,6 +28,92 @@
 
 #include "core.h"
 #include "hcd.h"
+
+/* Only an opted-in, externally powered host-only PHY uses this path. */
+static void dwc2_charger_work(struct work_struct *work)
+{
+	struct dwc2_hsotg *hsotg =
+		container_of(work, struct dwc2_hsotg, charger_work.work);
+	struct usb_hcd *hcd = dwc2_hsotg_to_hcd(hsotg);
+	struct usb_device *rh = hcd->self.root_hub;
+	unsigned long flags;
+	u32 ahbcfg, gintmsk, hprt0;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(&rh->dev);
+	if (ret < 0)
+		goto requeue;
+	/* Exclude hub enumeration and disconnect while borrowing the data lines. */
+	usb_lock_device(rh);
+	spin_lock_irqsave(&hsotg->lock, flags);
+	if (!HCD_HW_ACCESSIBLE(hcd) || hsotg->lx_state != DWC2_L0 ||
+	    !dwc2_is_host_mode(hsotg))
+		goto unlock;
+	hprt0 = dwc2_readl(hsotg, HPRT0);
+	if ((hprt0 & HPRT0_CONNSTS) || hsotg->flags.b.port_connect_status ||
+	    usb_hub_find_child(rh, 1)) {
+		spin_unlock_irqrestore(&hsotg->lock, flags);
+		/* A data device must invalidate any previous high-current result. */
+		phy_notify_connect(hsotg->phy, 1);
+		goto put;
+	}
+	if (hprt0 & (HPRT0_ENA | HPRT0_RST | HPRT0_RES))
+		goto unlock;
+	ahbcfg = dwc2_readl(hsotg, GAHBCFG);
+	if (!(ahbcfg & GAHBCFG_GLBL_INTR_EN))
+		goto unlock;
+	gintmsk = dwc2_readl(hsotg, GINTMSK);
+	dwc2_disable_global_interrupts(hsotg);
+	/* The shared HCD IRQ handler also needs all interrupt sources masked. */
+	dwc2_writel(hsotg, 0, GINTMSK);
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+	synchronize_irq(hsotg->irq);
+
+	/* No data device or transfer exists; the PHY restores its normal mode. */
+	ret = phy_notify_disconnect(hsotg->phy, 1);
+	usleep_range(1500, 2000);
+	spin_lock_irqsave(&hsotg->lock, flags);
+	hprt0 = dwc2_read_hprt0(hsotg);
+	if (!(hprt0 & HPRT0_CONNSTS)) {
+		/* Discard detector-induced edges, but retain a real new connection. */
+		dwc2_writel(hsotg, hprt0 | HPRT0_CONNDET | HPRT0_ENACHG, HPRT0);
+		dwc2_writel(hsotg, GINTSTS_DISCONNINT, GINTSTS);
+	}
+	dwc2_writel(hsotg, gintmsk, GINTMSK);
+	dwc2_enable_global_interrupts(hsotg);
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+	if (hprt0 & HPRT0_CONNSTS)
+		phy_notify_connect(hsotg->phy, 1);
+	if (ret)
+		dev_err_ratelimited(hsotg->dev, "idle charger detection failed: %d\n", ret);
+	goto put;
+unlock:
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+put:
+	usb_unlock_device(rh);
+	pm_runtime_put(&rh->dev);
+requeue:
+	if (READ_ONCE(hsotg->charger_detection))
+		queue_delayed_work(system_freezable_wq, &hsotg->charger_work,
+				   msecs_to_jiffies(2000));
+}
+
+static void dwc2_charger_changed(struct dwc2_hsotg *hsotg)
+{
+	/* Called with the HCD spinlock held, including from the IRQ handler. */
+	if (hsotg->charger_detection)
+		mod_delayed_work(system_freezable_wq, &hsotg->charger_work, 0);
+}
+
+void dwc2_charger_detection_stop(struct dwc2_hsotg *hsotg)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&hsotg->lock, flags);
+	WRITE_ONCE(hsotg->charger_detection, false);
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+	cancel_delayed_work_sync(&hsotg->charger_work);
+}
 
 /*
  * =========================================================================
@@ -1727,6 +1815,7 @@ void dwc2_hcd_connect(struct dwc2_hsotg *hsotg)
 
 	hsotg->flags.b.port_connect_status_change = 1;
 	hsotg->flags.b.port_connect_status = 1;
+	dwc2_charger_changed(hsotg);
 }
 
 /**
@@ -1745,6 +1834,7 @@ void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg, bool force)
 	/* Set status flags for the hub driver */
 	hsotg->flags.b.port_connect_status_change = 1;
 	hsotg->flags.b.port_connect_status = 0;
+	dwc2_charger_changed(hsotg);
 
 	/*
 	 * Shutdown any transfers in process by clearing the Tx FIFO Empty
@@ -5110,6 +5200,8 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg)
 	int i, num_channels;
 	int retval;
 
+	INIT_DELAYED_WORK(&hsotg->charger_work, dwc2_charger_work);
+
 	if (usb_disabled())
 		return -ENODEV;
 
@@ -5337,6 +5429,15 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg)
 
 	dwc2_enable_global_interrupts(hsotg);
 
+	if (hsotg->dr_mode == USB_DR_MODE_HOST && hsotg->phy &&
+	    of_property_read_bool(hsotg->phy->dev.of_node,
+				  "rockchip,host-charger-detection") &&
+	    !hsotg->vbus_supply) {
+		WRITE_ONCE(hsotg->charger_detection, true);
+		queue_delayed_work(system_freezable_wq, &hsotg->charger_work,
+				   msecs_to_jiffies(2000));
+	}
+
 	return 0;
 
 error4:
@@ -5376,6 +5477,8 @@ void dwc2_hcd_remove(struct dwc2_hsotg *hsotg)
 			__func__);
 		return;
 	}
+
+	dwc2_charger_detection_stop(hsotg);
 
 	if (!IS_ERR_OR_NULL(hsotg->uphy))
 		otg_set_host(hsotg->uphy->otg, NULL);

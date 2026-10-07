@@ -989,6 +989,8 @@ struct dwc2_hregs_backup {
  * @status_buf:         Buffer used for data received during the status phase of
  *                      a control transfer.
  * @status_buf_dma:     DMA address for status_buf
+ * @charger_work:       Delayed work for charger detection on an empty host port
+ * @charger_detection:  Whether idle host charger detection is enabled
  * @start_work:         Delayed work for handling host A-cable connection
  * @reset_work:         Delayed work for handling a port reset
  * @phy_reset_work:     Work structure for doing a PHY reset
@@ -1133,6 +1135,9 @@ struct dwc2_hsotg {
 #define DWC2_RESTORE_DCFG BIT(1)
 
 #if IS_ENABLED(CONFIG_USB_DWC2_HOST) || IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)
+	struct delayed_work charger_work;
+	bool charger_detection;
+
 	union dwc2_hcd_internal_flags {
 		u32 d32;
 		struct {
@@ -1503,6 +1508,7 @@ int dwc2_hcd_get_frame_number(struct dwc2_hsotg *hsotg);
 int dwc2_hcd_get_future_frame_number(struct dwc2_hsotg *hsotg, int us);
 void dwc2_hcd_connect(struct dwc2_hsotg *hsotg);
 void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg, bool force);
+void dwc2_charger_detection_stop(struct dwc2_hsotg *hsotg);
 void dwc2_hcd_start(struct dwc2_hsotg *hsotg);
 int dwc2_core_init(struct dwc2_hsotg *hsotg, bool initial_setup);
 int dwc2_port_suspend(struct dwc2_hsotg *hsotg, u16 windex);
@@ -1540,6 +1546,7 @@ static inline int dwc2_port_resume(struct dwc2_hsotg *hsotg)
 { return 0; }
 static inline int dwc2_hcd_init(struct dwc2_hsotg *hsotg)
 { return 0; }
+static inline void dwc2_charger_detection_stop(struct dwc2_hsotg *hsotg) {}
 static inline int dwc2_backup_host_registers(struct dwc2_hsotg *hsotg)
 { return 0; }
 static inline int dwc2_restore_host_registers(struct dwc2_hsotg *hsotg)

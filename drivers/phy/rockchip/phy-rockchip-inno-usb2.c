@@ -681,7 +681,7 @@ static int rockchip_usb2phy_charger_read(struct regmap *map,
 	return 0;
 }
 
-/* Called with phy->mutex held, and only when its power_count is zero. */
+/* Called with phy->mutex held and the consumer's data path quiesced. */
 static int rockchip_usb2phy_host_charger_detect(struct rockchip_usb2phy *rphy,
 					      struct rockchip_usb2phy_port *rport,
 					      unsigned int *cable)
@@ -708,7 +708,7 @@ static int rockchip_usb2phy_host_charger_detect(struct rockchip_usb2phy *rphy,
 	ret = property_enable(base, &rport->port_cfg->phy_sus, false);
 	if (ret)
 		goto restore;
-	/* Non-driving mode, with no USB controller or VBUS source enabled. */
+	/* Non-driving mode: the host data path is quiesced, with no VBUS source. */
 	ret = property_enable(base, &det->opmode, false);
 	if (ret)
 		goto restore;
@@ -794,21 +794,16 @@ restore:
 	return ret;
 }
 
-static void rockchip_usb2phy_host_charger_work(struct work_struct *work)
+static int rockchip_usb2phy_host_charger_check(struct rockchip_usb2phy *rphy,
+					     struct rockchip_usb2phy_port *rport,
+					     bool host_idle)
 {
-	struct rockchip_usb2phy_port *rport =
-		container_of(work, struct rockchip_usb2phy_port, host_chg_work.work);
-	struct rockchip_usb2phy *rphy = dev_get_drvdata(rport->phy->dev.parent);
 	unsigned int cable = EXTCON_NONE;
 	int generation;
 	bool vbus, id;
 	int ret = 0;
 
-	/* Serialize against generic PHY init/exit/power operations, including bind. */
-	mutex_lock(&rport->phy->mutex);
 	generation = atomic_read(&rport->charger_generation);
-	if (rport->phy->power_count)
-		goto notify;
 	ret = rockchip_usb2phy_charger_read(rphy->grf, &rport->port_cfg->utmi_bvalid, &vbus);
 	if (ret || !vbus)
 		goto notify;
@@ -817,12 +812,46 @@ static void rockchip_usb2phy_host_charger_work(struct work_struct *work)
 		goto notify;
 	if (rport->charger_cable)
 		cable = rport->charger_cable;
-	else
+	else if (!rport->phy->power_count || host_idle)
 		ret = rockchip_usb2phy_host_charger_detect(rphy, rport, &cable);
 notify:
 	if (generation != atomic_read(&rport->charger_generation))
 		cable = EXTCON_NONE;
 	rockchip_usb2phy_charger_notify(rphy, rport, cable);
+	return ret;
+}
+
+static int rockchip_usb2phy_connect(struct phy *phy, int port)
+{
+	struct rockchip_usb2phy_port *rport = phy_get_drvdata(phy);
+	struct rockchip_usb2phy *rphy = dev_get_drvdata(phy->dev.parent);
+
+	if (rport->charger_detection)
+		rockchip_usb2phy_charger_notify(rphy, rport, EXTCON_NONE);
+	return 0;
+}
+
+static int rockchip_usb2phy_disconnect(struct phy *phy, int port)
+{
+	struct rockchip_usb2phy_port *rport = phy_get_drvdata(phy);
+	struct rockchip_usb2phy *rphy = dev_get_drvdata(phy->dev.parent);
+
+	if (!rport->charger_detection)
+		return 0;
+	/* DWC2 has locked the empty root hub and quiesced its interrupts. */
+	return rockchip_usb2phy_host_charger_check(rphy, rport, true);
+}
+
+static void rockchip_usb2phy_host_charger_work(struct work_struct *work)
+{
+	struct rockchip_usb2phy_port *rport =
+		container_of(work, struct rockchip_usb2phy_port, host_chg_work.work);
+	struct rockchip_usb2phy *rphy = dev_get_drvdata(rport->phy->dev.parent);
+	int ret;
+
+	/* Only the consumer may authorize detection on a powered PHY. */
+	mutex_lock(&rport->phy->mutex);
+	ret = rockchip_usb2phy_host_charger_check(rphy, rport, false);
 	mutex_unlock(&rport->phy->mutex);
 	if (ret)
 		dev_err_ratelimited(rphy->dev, "charger-only detection failed: %d\n", ret);
@@ -882,6 +911,8 @@ static const struct phy_ops rockchip_usb2phy_ops = {
 	.exit		= rockchip_usb2phy_exit,
 	.power_on	= rockchip_usb2phy_power_on,
 	.power_off	= rockchip_usb2phy_power_off,
+	.connect	= rockchip_usb2phy_connect,
+	.disconnect	= rockchip_usb2phy_disconnect,
 	.owner		= THIS_MODULE,
 };
 
