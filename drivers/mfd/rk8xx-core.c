@@ -60,6 +60,7 @@ static const struct resource rk817_charger_resources[] = {
 static const struct resource rk818_charger_resources[] = {
 	DEFINE_RES_IRQ(RK818_IRQ_PLUG_IN),
 	DEFINE_RES_IRQ(RK818_IRQ_PLUG_OUT),
+	DEFINE_RES_IRQ(RK818_IRQ_VB_LO),
 };
 
 static const struct mfd_cell rk805s[] = {

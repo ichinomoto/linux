@@ -11,12 +11,18 @@
 #include <linux/devm-helpers.h>
 #include <linux/extcon.h>
 #include <linux/interrupt.h>
+#include <linux/jiffies.h>
+#include <linux/math64.h>
 #include <linux/mfd/rk808.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
+#include <linux/pm_wakeirq.h>
+#include <linux/pm_wakeup.h>
 #include <linux/power_supply.h>
+#include <linux/reboot.h>
 #include <linux/regmap.h>
 #include <linux/unaligned.h>
 
@@ -25,6 +31,10 @@
 #define RK818_MIN_FCC_MAH			500
 #define RK818_USB_INPUT_CURRENT_UA	450000
 #define RK818_THERMAL_FEEDBACK_MASK	GENMASK(3, 2)
+#define RK818_GAUGE_REST_MINUTES		30
+#define RK818_GAUGE_CORRECTION_MS		60000
+#define RK818_LOW_VOLTAGE_MARGIN_UV	50000
+#define RK818_POWEROFF_TIMEOUT_MS		10000
 
 static const int rk818_input_currents[] = {
 	450000, 800000, 850000, 1000000, 1250000, 1500000,
@@ -59,10 +69,20 @@ struct rk818_charger {
 	int charge_full_max_uah;
 	int voltage_min_design_uv;
 	int voltage_max_design_uv;
+	int internal_resistance_uohm;
 	int constant_charge_current_max_ua;
 	int constant_charge_voltage_max_uv;
 	int input_current_max_ua;
 	u32 feedback_temp_mc;
+	/* Serialize live counter reads with gauge calibration writes. */
+	struct mutex gauge_lock;
+	int saved_charge_mah;
+	int saved_soc;
+	unsigned long negative_since;
+	unsigned long low_voltage_since;
+	bool negative_pending;
+	bool low_voltage_pending;
+	bool shutdown_pending;
 };
 
 static int rk818_read_be16(struct rk818_charger *charger, unsigned int reg,
@@ -91,6 +111,15 @@ static int rk818_read_be32(struct rk818_charger *charger, unsigned int reg,
 
 	*value = get_unaligned_be32(data);
 	return 0;
+}
+
+static int rk818_write_be32(struct rk818_charger *charger, unsigned int reg,
+			    u32 value)
+{
+	u8 data[4];
+
+	put_unaligned_be32(value, data);
+	return regmap_bulk_write(charger->rk808->regmap, reg, data, sizeof(data));
 }
 
 static int rk818_calibrate_voltage(struct rk818_charger *charger)
@@ -264,22 +293,45 @@ static int rk818_read_current(struct rk818_charger *charger, int *current_ua)
 	return 0;
 }
 
-static int rk818_read_charge_now(struct rk818_charger *charger, int *charge_uah)
+static int rk818_read_charge_counter(struct rk818_charger *charger, s32 *counter)
 {
-	u32 raw;
-	u32 charge_mah;
+	u32 first, raw;
 	int ret;
 
+	/* The gauge updates GASCNT while the I2C transaction is in progress. */
+	ret = rk818_read_be32(charger, RK818_GASCNT3_REG, &first);
+	if (ret)
+		return ret;
 	ret = rk818_read_be32(charger, RK818_GASCNT3_REG, &raw);
 	if (ret)
 		return ret;
+	if (first != raw) {
+		ret = rk818_read_be32(charger, RK818_GASCNT3_REG, &raw);
+		if (ret)
+			return ret;
+	}
 
-	charge_mah = raw / RK818_GASCNT_PER_MAH;
-	if (charge_mah > INT_MAX / 1000)
-		return -ERANGE;
-
-	*charge_uah = charge_mah * 1000;
+	*counter = (s32)raw;
 	return 0;
+}
+
+static int rk818_read_charge_now(struct rk818_charger *charger, int *charge_uah)
+{
+	s32 counter;
+	int ret;
+
+	mutex_lock(&charger->gauge_lock);
+	if (charger->shutdown_pending) {
+		*charge_uah = 0;
+		ret = 0;
+	} else {
+		ret = rk818_read_charge_counter(charger, &counter);
+		if (!ret)
+			*charge_uah = max(counter, 0) / RK818_GASCNT_PER_MAH * 1000;
+	}
+	mutex_unlock(&charger->gauge_lock);
+
+	return ret;
 }
 
 static int rk818_read_charge_full(struct rk818_charger *charger, int *charge_uah)
@@ -330,6 +382,11 @@ static int rk818_battery_status(struct rk818_charger *charger, int *status)
 	unsigned int charge_status;
 	bool plugged;
 	int ret;
+
+	if (READ_ONCE(charger->shutdown_pending)) {
+		*status = POWER_SUPPLY_STATUS_DISCHARGING;
+		return 0;
+	}
 
 	ret = rk818_read_plugged(charger, &plugged);
 	if (ret)
@@ -399,12 +456,264 @@ static int rk818_battery_health(struct rk818_charger *charger, int *health)
 	return 0;
 }
 
+static int rk818_voltage_capacity(struct rk818_charger *charger, int voltage_uv)
+{
+	int capacity;
+
+	if (charger->ocv_table)
+		capacity = power_supply_ocv2cap_simple(charger->ocv_table,
+						       charger->ocv_table_len,
+						       voltage_uv);
+	else
+		capacity = DIV_ROUND_CLOSEST((voltage_uv -
+					     charger->voltage_min_design_uv) * 100,
+					    charger->voltage_max_design_uv -
+					     charger->voltage_min_design_uv);
+
+	return clamp(capacity, 0, 100);
+}
+
+/* gauge_lock must be held across calibration and the subsequent saved state. */
+static int rk818_calibrate_charge(struct rk818_charger *charger, int charge_uah)
+{
+	int charge_mah = charge_uah / 1000;
+
+	if (charge_uah < 0 || charge_mah > INT_MAX / RK818_GASCNT_PER_MAH)
+		return -ERANGE;
+
+	return rk818_write_be32(charger, RK818_GASCNT_CAL_REG3,
+				charge_mah * RK818_GASCNT_PER_MAH);
+}
+
+static int rk818_save_gauge(struct rk818_charger *charger, int charge_uah,
+			    int full_uah)
+{
+	int charge_mah = clamp(charge_uah, 0, full_uah) / 1000;
+	int soc = DIV_ROUND_CLOSEST_ULL((u64)charge_mah * 100000, full_uah);
+	int ret;
+
+	/* Match the BSP's plain-mAh REMAIN_CAP and percentage SOC layout. */
+	if (charge_mah != charger->saved_charge_mah) {
+		ret = rk818_write_be32(charger, RK818_REMAIN_CAP_REG3, charge_mah);
+		if (ret)
+			return ret;
+		charger->saved_charge_mah = charge_mah;
+	}
+	if (soc != charger->saved_soc) {
+		ret = regmap_write(charger->rk808->regmap, RK818_SOC_REG, soc);
+		if (ret)
+			return ret;
+		charger->saved_soc = soc;
+	}
+
+	return 0;
+}
+
+static int rk818_gauge_init(struct rk818_charger *charger)
+{
+	unsigned int gauge_status, mark, off_minutes, saved_minutes;
+	unsigned int reset_mask = RK818_MISC_FG_RESET_NOW;
+	bool relaxed, use_ocv;
+	int charge_uah, full_uah, ocv_raw, ocv_uv;
+	s32 counter;
+	int ret;
+
+	mutex_lock(&charger->gauge_lock);
+	ret = rk818_read_charge_full(charger, &full_uah);
+	if (ret)
+		goto out;
+	ret = rk818_read_charge_counter(charger, &counter);
+	if (ret)
+		goto out;
+	ret = regmap_read(charger->rk808->regmap, RK818_GGSTS_REG, &gauge_status);
+	if (ret)
+		goto out;
+	ret = regmap_read(charger->rk808->regmap, RK818_MISC_MARK_REG, &mark);
+	if (ret)
+		goto out;
+	ret = regmap_read(charger->rk808->regmap, RK818_NON_ACT_TIMER_CNT_REG,
+			  &off_minutes);
+	if (ret)
+		goto out;
+	ret = regmap_read(charger->rk808->regmap, RK818_NON_ACT_TIMER_CNT_SAVE_REG,
+			  &saved_minutes);
+	if (ret)
+		goto out;
+
+	relaxed = off_minutes != saved_minutes &&
+		  off_minutes >= RK818_GAUGE_REST_MINUTES;
+	if (relaxed)
+		reset_mask |= RK818_MISC_FG_RESET_LATE;
+	use_ocv = (gauge_status & RK818_GGSTS_BAT_CON) || (mark & reset_mask) ||
+		  (relaxed && !(mark & RK818_MISC_FG_INIT));
+	charge_uah = max(counter, 0) / RK818_GASCNT_PER_MAH * 1000;
+	if (use_ocv) {
+		ret = rk818_read_be16(charger, RK818_BAT_OCV_REGH, &ocv_raw);
+		if (ret)
+			goto out;
+		ocv_uv = (charger->voltage_k * ocv_raw / 1000 +
+			  charger->voltage_b) * 1000;
+		charge_uah = div_u64((u64)full_uah *
+				    rk818_voltage_capacity(charger, ocv_uv), 100);
+	}
+
+	if (use_ocv || counter < 0 || charge_uah > full_uah) {
+		charge_uah = clamp(charge_uah, 0, full_uah);
+		ret = rk818_calibrate_charge(charger, charge_uah);
+		if (ret)
+			goto out;
+	}
+	ret = rk818_save_gauge(charger, charge_uah, full_uah);
+	if (ret)
+		goto out;
+
+	/* Do not consume a calibration request until its writes have succeeded. */
+	ret = regmap_update_bits(charger->rk808->regmap, RK818_GGSTS_REG,
+				 RK818_GGSTS_BAT_CON, 0);
+	if (ret)
+		goto out;
+	ret = regmap_update_bits(charger->rk808->regmap, RK818_MISC_MARK_REG,
+				 RK818_MISC_FG_INIT | (mark & reset_mask), 0);
+	if (ret)
+		goto out;
+	ret = regmap_write(charger->rk808->regmap,
+			   RK818_NON_ACT_TIMER_CNT_SAVE_REG, off_minutes);
+out:
+	mutex_unlock(&charger->gauge_lock);
+	return ret;
+}
+
+static bool rk818_check_low_voltage(struct rk818_charger *charger,
+				    int voltage_uv, int current_ua, bool plugged)
+{
+	bool discharging = current_ua < 0 || (!plugged && !current_ua);
+
+	if (!discharging || voltage_uv >= charger->voltage_min_design_uv) {
+		charger->low_voltage_pending = false;
+		return false;
+	}
+	if (!charger->low_voltage_pending) {
+		charger->low_voltage_since = jiffies;
+		charger->low_voltage_pending = true;
+	}
+
+	return voltage_uv <= charger->voltage_min_design_uv -
+			     RK818_LOW_VOLTAGE_MARGIN_UV ||
+	       time_after_eq(jiffies, charger->low_voltage_since +
+			     msecs_to_jiffies(RK818_GAUGE_CORRECTION_MS));
+}
+
+static int rk818_gauge_update(struct rk818_charger *charger)
+{
+	unsigned int supply_status, charge_status;
+	int voltage_uv, current_ua, charge_uah, full_uah;
+	s64 ocv_uv;
+	s32 counter;
+	bool plugged, poweroff = false;
+	int ret;
+
+	mutex_lock(&charger->gauge_lock);
+	if (charger->shutdown_pending) {
+		ret = 0;
+		goto out;
+	}
+	ret = rk818_read_supply_status(charger, &supply_status);
+	if (ret)
+		goto sample_error;
+	if (!(supply_status & RK818_SUP_STS_BAT_EXS)) {
+		ret = -ENODATA;
+		goto sample_error;
+	}
+	ret = rk818_read_voltage(charger, &voltage_uv);
+	if (ret)
+		goto sample_error;
+	ret = rk818_read_current(charger, &current_ua);
+	if (ret)
+		goto sample_error;
+	ret = rk818_read_plugged(charger, &plugged);
+	if (ret)
+		goto sample_error;
+
+	/* An attached charger is not sufficient if the battery still discharges. */
+	if (rk818_check_low_voltage(charger, voltage_uv, current_ua, plugged)) {
+		WRITE_ONCE(charger->shutdown_pending, true);
+		charger->negative_pending = false;
+		poweroff = true;
+		/* Do not resurrect stale charge on a short-off reboot. */
+		ret = rk818_calibrate_charge(charger, 0);
+		if (!ret)
+			ret = rk818_save_gauge(charger, 0,
+					       charger->charge_full_design_uah);
+		goto out;
+	}
+
+	ret = rk818_read_charge_full(charger, &full_uah);
+	if (ret)
+		goto gauge_error;
+	ret = rk818_read_charge_counter(charger, &counter);
+	if (ret)
+		goto gauge_error;
+	charge_uah = max(counter, 0) / RK818_GASCNT_PER_MAH * 1000;
+	charge_status = FIELD_GET(RK818_SUP_STS_CHRG_MASK, supply_status);
+	if ((plugged && current_ua >= 0 && charge_status == RK818_CHARGE_FINISH &&
+	     voltage_uv >= charger->constant_charge_voltage_max_uv - 150000) ||
+	    charge_uah > full_uah) {
+		if (charge_uah != full_uah) {
+			ret = rk818_calibrate_charge(charger, full_uah);
+			if (ret)
+				goto gauge_error;
+		}
+		charge_uah = full_uah;
+		charger->negative_pending = false;
+	} else if (counter < 0) {
+		if (!charger->negative_pending) {
+			charger->negative_since = jiffies;
+			charger->negative_pending = true;
+		}
+		if (time_after_eq(jiffies, charger->negative_since +
+				  msecs_to_jiffies(RK818_GAUGE_CORRECTION_MS))) {
+			/* BSP load compensation, converted from mV/mA to uV/uA. */
+			ocv_uv = voltage_uv -
+				 div_s64((s64)current_ua *
+					 charger->internal_resistance_uohm, 1000000);
+			ocv_uv = clamp_t(s64, ocv_uv, charger->voltage_min_design_uv,
+					 charger->voltage_max_design_uv);
+			charge_uah = div_u64((u64)full_uah *
+					    rk818_voltage_capacity(charger, ocv_uv), 100);
+			ret = rk818_calibrate_charge(charger, charge_uah);
+			if (ret)
+				goto gauge_error;
+			charger->negative_pending = false;
+		}
+	} else {
+		charger->negative_pending = false;
+	}
+
+	ret = rk818_save_gauge(charger, charge_uah, full_uah);
+	goto out;
+sample_error:
+	charger->low_voltage_pending = false;
+gauge_error:
+	charger->negative_pending = false;
+out:
+	mutex_unlock(&charger->gauge_lock);
+	if (poweroff)
+		__hw_protection_trigger("RK818 battery voltage too low",
+					RK818_POWEROFF_TIMEOUT_MS, HWPROT_ACT_SHUTDOWN);
+	return ret;
+}
+
 static int rk818_battery_capacity(struct rk818_charger *charger, int *capacity)
 {
 	int charge_now, charge_full;
 	int voltage_uv;
 	u64 percent;
 	int ret;
+
+	if (READ_ONCE(charger->shutdown_pending)) {
+		*capacity = 0;
+		return 0;
+	}
 
 	/*
 	 * SOC_REG is a software-saved display value, not a live gauge result.
@@ -428,17 +737,7 @@ static int rk818_battery_capacity(struct rk818_charger *charger, int *capacity)
 	if (ret)
 		return ret;
 
-	if (charger->ocv_table)
-		*capacity = power_supply_ocv2cap_simple(charger->ocv_table,
-							charger->ocv_table_len,
-							voltage_uv);
-	else
-		*capacity = DIV_ROUND_CLOSEST((voltage_uv -
-					charger->voltage_min_design_uv) * 100,
-				       charger->voltage_max_design_uv -
-					charger->voltage_min_design_uv);
-
-	*capacity = clamp(*capacity, 0, 100);
+	*capacity = rk818_voltage_capacity(charger, voltage_uv);
 	return 0;
 }
 
@@ -649,6 +948,10 @@ static void rk818_monitor_work(struct work_struct *work)
 	if (ret)
 		dev_err_ratelimited(charger->dev, "input current update failed: %d\n", ret);
 
+	ret = rk818_gauge_update(charger);
+	if (ret)
+		dev_err_ratelimited(charger->dev, "fuel gauge update failed: %d\n", ret);
+
 	power_supply_changed(charger->battery);
 	power_supply_changed(charger->ac);
 	power_supply_changed(charger->usb);
@@ -670,6 +973,23 @@ static irqreturn_t rk818_plug_irq(int irq, void *data)
 
 	mod_delayed_work(system_freezable_wq, &charger->work, 0);
 	return IRQ_HANDLED;
+}
+
+static irqreturn_t rk818_vb_low_irq(int irq, void *data)
+{
+	struct rk818_charger *charger = data;
+
+	/* Recheck voltage/current; a stale threshold IRQ is not a shutdown request. */
+	mod_delayed_work(system_freezable_wq, &charger->work, 0);
+	return IRQ_HANDLED;
+}
+
+static void rk818_disable_wakeup(void *data)
+{
+	struct device *dev = data;
+
+	dev_pm_clear_wake_irq(dev);
+	device_init_wakeup(dev, false);
 }
 
 static void rk818_put_of_node(void *data)
@@ -722,6 +1042,7 @@ static int rk818_read_battery_info(struct rk818_charger *charger)
 	charger->charge_full_design_uah = info->charge_full_design_uah;
 	charger->voltage_min_design_uv = info->voltage_min_design_uv;
 	charger->voltage_max_design_uv = info->voltage_max_design_uv;
+	charger->internal_resistance_uohm = max(info->factory_internal_resistance_uohm, 0);
 	charger->constant_charge_current_max_ua =
 		info->constant_charge_current_max_ua;
 	charger->constant_charge_voltage_max_uv =
@@ -792,7 +1113,7 @@ static int rk818_charger_probe(struct platform_device *pdev)
 	struct power_supply_config config = {};
 	struct device_node *node;
 	struct rk818_charger *charger;
-	int plug_in_irq, plug_out_irq;
+	int plug_in_irq, plug_out_irq, vb_low_irq;
 	int ret;
 
 	node = of_get_child_by_name(pdev->dev.parent->of_node, "charger");
@@ -809,6 +1130,9 @@ static int rk818_charger_probe(struct platform_device *pdev)
 
 	charger->dev = &pdev->dev;
 	charger->rk808 = rk808;
+	mutex_init(&charger->gauge_lock);
+	charger->saved_charge_mah = -1;
+	charger->saved_soc = -1;
 	platform_set_drvdata(pdev, charger);
 
 	ret = regmap_update_bits(rk808->regmap, RK818_TS_CTRL_REG,
@@ -851,6 +1175,15 @@ static int rk818_charger_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "failed to initialize charger\n");
 
+	/* Match the BSP's eight-minute OCV and ADC-offset sampling periods. */
+	ret = regmap_update_bits(rk808->regmap, RK818_GGCON_REG,
+				 RK818_GGCON_OCV_SAMPLE_MASK | RK818_GGCON_ADC_CAL_MASK, 0);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "failed to set gauge sampling\n");
+	ret = rk818_gauge_init(charger);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "failed to initialize fuel gauge\n");
+
 	charger->ac = devm_power_supply_register(&pdev->dev, &rk818_ac_desc,
 						 &config);
 	if (IS_ERR(charger->ac))
@@ -886,6 +1219,10 @@ static int rk818_charger_probe(struct platform_device *pdev)
 	if (plug_out_irq < 0)
 		return plug_out_irq;
 
+	vb_low_irq = platform_get_irq(pdev, 2);
+	if (vb_low_irq < 0)
+		return vb_low_irq;
+
 	ret = devm_request_threaded_irq(&pdev->dev, plug_in_irq, NULL,
 					rk818_plug_irq, IRQF_ONESHOT,
 					"rk818-plug-in", charger);
@@ -900,6 +1237,24 @@ static int rk818_charger_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "failed to request plug-out IRQ\n");
 
+	ret = devm_request_threaded_irq(&pdev->dev, vb_low_irq, NULL,
+					rk818_vb_low_irq, IRQF_ONESHOT,
+					"rk818-vb-low", charger);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "failed to request low-voltage IRQ\n");
+	ret = device_init_wakeup(&pdev->dev, true);
+	if (ret)
+		return ret;
+	ret = dev_pm_set_wake_irq(&pdev->dev, vb_low_irq);
+	if (ret) {
+		device_init_wakeup(&pdev->dev, false);
+		return dev_err_probe(&pdev->dev, ret, "failed to set low-voltage wake IRQ\n");
+	}
+	ret = devm_add_action_or_reset(&pdev->dev, rk818_disable_wakeup, &pdev->dev);
+	if (ret)
+		return ret;
+
 	mod_delayed_work(system_freezable_wq, &charger->work, 0);
 	dev_info(&pdev->dev, "RK818 battery monitor initialized\n");
 
@@ -909,6 +1264,14 @@ static int rk818_charger_probe(struct platform_device *pdev)
 static int rk818_charger_suspend(struct device *dev)
 {
 	struct rk818_charger *charger = dev_get_drvdata(dev);
+
+	if (READ_ONCE(charger->shutdown_pending))
+		return -EBUSY;
+
+	mutex_lock(&charger->gauge_lock);
+	charger->negative_pending = false;
+	charger->low_voltage_pending = false;
+	mutex_unlock(&charger->gauge_lock);
 
 	/* A new cable cannot be classified while the system is asleep. */
 	return regmap_update_bits(charger->rk808->regmap, RK818_USB_CTRL_REG,
