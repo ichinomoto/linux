@@ -300,17 +300,29 @@
 		system-power-controller;
 		wakeup-source;
 		#clock-cells = <1>;
+		usb-supply = <&vcc_otg_boost>;
 
 		charger {
 			monitored-battery = <&battery>;
 			rockchip,charge-full-max-microamp-hours = <4350000>;
 			extcon = <&usb2phy>;
+			otg-vbus-supply = <&vcc_otg_test>;
 			input-current-limit-microamp = <1250000>;
 			/* The DM200 BSP leaves this at the RK818 reset threshold. */
 			rockchip,charge-feedback-temperature-millicelsius = <85000>;
 		};
 
 		regulators {
+			vcc_otg_boost: DCDC_BOOST {
+				regulator-name = "rk818_otg_boost";
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5000000>;
+			};
+
+			vcc_otg_test: OTG_SWITCH {
+				regulator-name = "rk818_otg_vbus_test";
+			};
+
 			vdd_arm: DCDC_REG1 {
 				regulator-name = "vdd_arm";
 				regulator-always-on;
@@ -578,7 +590,7 @@
 };
 
 &usb_otg {
-	/* No VBUS source on Pomera: use externally powered USB devices. */
+	/* VBUS stays off unless a separate manual RK818 lease is requested. */
 	dr_mode = "host";
 	status = "okay";
 };

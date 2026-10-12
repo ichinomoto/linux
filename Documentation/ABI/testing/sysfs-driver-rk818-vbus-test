@@ -1,0 +1,44 @@
+What:		/sys/class/power_supply/USB/device/vbus_test
+Date:		October 2026
+Contact:	ichinomoto <ichinomoto@gmail.com>
+Description:
+		Manual, leased VBUS output for Pomera DM200 and DM250 only.
+		Available when the charger has an otg-vbus-supply in DT.
+		Read: 1 when this driver has enabled the OTG output, otherwise 0.
+		This is software state, not a connector voltage measurement.
+		Write: 1..30 enables output for that many seconds; 0 stops it.
+		Repeating a nonzero write cannot extend a running lease (EBUSY).
+		Root writes only. No output is started at boot, resume or replug.
+		External VBUS present at start returns EBUSY, using the raw input
+		indication while output is OFF. Before enabling, userspace must
+		warn that chargers, PCs and VBUS-sourcing hubs MUST NOT be connected
+		until output has been successfully stopped (vbus_ctl off).
+		External supply insertion during output cannot be reliably
+		distinguished from our own voltage. Logical suppression of our own
+		output in charger reporting is not an independent external-power
+		sensor. This interface provides no electrical collision protection.
+		Charging is paused before enabling the regulator and restored only
+		after disabling it successfully. Failed OFF remains non-renewable
+		and keeps charging paused; the running kernel retries timed and
+		explicit OFF failures. Suspend, hibernate, shutdown and driver unbind
+		stop output. A failed OFF prevents suspend. Resume never starts it.
+		Timeout requires a running kernel; it cannot recover a hardware hang.
+
+What:		/sys/class/power_supply/USB/device/vbus_keepalive
+Date:		October 2026
+Contact:	ichinomoto <ichinomoto@gmail.com>
+Description:
+		Root-only, write-only renewal for an existing leased VBUS output.
+		Write 1..30 to replace its deadline with that many seconds from now.
+		Output must already be enabled, unexpired and not stopping,
+		suspended or shutting down; otherwise ESHUTDOWN is returned.
+		This never starts output. Invalid durations return EINVAL before
+		checking output state, as for vbus_test.
+		Healthy userspace monitoring may renew indefinitely: there is no
+		total session limit, but each individual kernel lease is at most
+		30 seconds. Userspace must verify USB device enumeration before
+		renewing and stop output on disconnect or host-off. If userspace
+		exits or hangs, the last deadline expires in at most 30 seconds
+		while the kernel runs. Use vbus_test=0 for an immediate stop.
+		All external-power restrictions and charging pause/restore behavior
+		of vbus_test still apply.
