@@ -8,6 +8,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/devm-helpers.h>
 #include <linux/extcon.h>
 #include <linux/interrupt.h>
@@ -24,6 +25,8 @@
 #include <linux/power_supply.h>
 #include <linux/reboot.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
+#include <linux/sysfs.h>
 #include <linux/unaligned.h>
 
 #define RK818_MONITOR_INTERVAL_MS	5000
@@ -35,6 +38,7 @@
 #define RK818_GAUGE_CORRECTION_MS		60000
 #define RK818_LOW_VOLTAGE_MARGIN_UV	50000
 #define RK818_POWEROFF_TIMEOUT_MS		10000
+#define RK818_VBUS_TEST_MAX_SECONDS	30
 
 static const int rk818_input_currents[] = {
 	450000, 800000, 850000, 1000000, 1250000, 1500000,
@@ -83,6 +87,16 @@ struct rk818_charger {
 	bool negative_pending;
 	bool low_voltage_pending;
 	bool shutdown_pending;
+	struct regulator *test_vbus;
+	/* Serializes manual output state and charging pause/restore. */
+	struct mutex vbus_lock;
+	struct delayed_work vbus_off_work;
+	bool vbus_enabled;
+	bool vbus_blocked;
+	bool vbus_stopping;
+	bool charge_paused;
+	unsigned int saved_charge_enable;
+	unsigned long vbus_deadline;
 };
 
 static int rk818_read_be16(struct rk818_charger *charger, unsigned int reg,
@@ -363,7 +377,7 @@ static int rk818_read_supply_status(struct rk818_charger *charger,
 	return regmap_read(charger->rk808->regmap, RK818_SUP_STS_REG, status);
 }
 
-static int rk818_read_plugged(struct rk818_charger *charger, bool *plugged)
+static int rk818_read_plugged_raw(struct rk818_charger *charger, bool *plugged)
 {
 	unsigned int value;
 	int ret;
@@ -374,6 +388,20 @@ static int rk818_read_plugged(struct rk818_charger *charger, bool *plugged)
 
 	*plugged = value & RK818_VB_MON_PLUG_IN_STS;
 	return 0;
+}
+
+static int rk818_read_plugged(struct rk818_charger *charger, bool *plugged)
+{
+	/*
+	 * Suppress our own output in logical charger/gauge reporting. This is
+	 * not an independent sensor for external power while sourcing VBUS.
+	 */
+	if (READ_ONCE(charger->vbus_enabled)) {
+		*plugged = false;
+		return 0;
+	}
+
+	return rk818_read_plugged_raw(charger, plugged);
 }
 
 static int rk818_battery_status(struct rk818_charger *charger, int *status)
@@ -938,6 +966,193 @@ static const struct power_supply_desc rk818_usb_desc = {
 	.get_property = rk818_external_get_property,
 };
 
+/* Caller holds vbus_lock. Never resume charging before the output is off. */
+static int rk818_vbus_test_stop(struct rk818_charger *charger)
+{
+	int ret;
+
+	/* Failed OFF remains non-renewable, including across timer wraparound. */
+	charger->vbus_stopping = true;
+	charger->vbus_deadline = jiffies;
+	if (charger->vbus_enabled) {
+		ret = regulator_disable(charger->test_vbus);
+		if (ret)
+			return ret;
+		WRITE_ONCE(charger->vbus_enabled, false);
+		msleep(100);
+	}
+	if (charger->charge_paused) {
+		ret = regmap_update_bits(charger->rk808->regmap, RK818_CHRG_CTRL_REG1,
+					 RK818_CHRG_CTRL1_EN, charger->saved_charge_enable);
+		if (ret)
+			return ret;
+		charger->charge_paused = false;
+	}
+	return 0;
+}
+
+static void rk818_vbus_test_expire(struct work_struct *work)
+{
+	struct rk818_charger *charger =
+		container_of(work, struct rk818_charger, vbus_off_work.work);
+	unsigned long now;
+	int ret;
+
+	mutex_lock(&charger->vbus_lock);
+	now = jiffies;
+	/* A callback already running when renewed must obey the new deadline. */
+	if (!charger->vbus_stopping && charger->vbus_enabled &&
+	    time_before(now, charger->vbus_deadline)) {
+		mod_delayed_work(system_wq, &charger->vbus_off_work,
+				 charger->vbus_deadline - now);
+		mutex_unlock(&charger->vbus_lock);
+		return;
+	}
+	ret = rk818_vbus_test_stop(charger);
+	if (ret) {
+		dev_err_ratelimited(charger->dev, "VBUS test stop failed: %d\n", ret);
+		mod_delayed_work(system_wq, &charger->vbus_off_work, HZ);
+	}
+	mutex_unlock(&charger->vbus_lock);
+	mod_delayed_work(system_freezable_wq, &charger->work, 0);
+}
+
+static int rk818_vbus_test_start(struct rk818_charger *charger)
+{
+	unsigned int reg;
+	bool plugged;
+	int ret, restore_ret;
+
+	if (charger->vbus_blocked || charger->vbus_enabled || charger->charge_paused ||
+	    READ_ONCE(charger->shutdown_pending))
+		return -EBUSY;
+	/* Check the raw input indication only while our output is OFF. */
+	ret = rk818_read_plugged_raw(charger, &plugged);
+	if (ret || plugged)
+		return ret ?: -EBUSY;
+	ret = regulator_is_enabled(charger->test_vbus);
+	if (ret)
+		return ret < 0 ? ret : -EBUSY;
+	ret = regmap_read(charger->rk808->regmap, RK818_CHRG_CTRL_REG1, &reg);
+	if (ret)
+		return ret;
+	charger->saved_charge_enable = reg & RK818_CHRG_CTRL1_EN;
+	ret = regmap_update_bits(charger->rk808->regmap, RK818_CHRG_CTRL_REG1,
+				 RK818_CHRG_CTRL1_EN, 0);
+	if (ret)
+		return ret;
+	charger->charge_paused = true;
+	charger->vbus_stopping = false;
+	WRITE_ONCE(charger->vbus_enabled, true);
+	ret = regulator_enable(charger->test_vbus);
+	if (!ret)
+		return 0;
+	WRITE_ONCE(charger->vbus_enabled, false);
+	restore_ret = rk818_vbus_test_stop(charger);
+	if (restore_ret) {
+		dev_err(charger->dev, "charger restore failed: %d\n", restore_ret);
+		mod_delayed_work(system_wq, &charger->vbus_off_work, HZ);
+	}
+	return ret;
+}
+
+static ssize_t vbus_test_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct rk818_charger *charger = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(charger->vbus_enabled));
+}
+
+static ssize_t vbus_test_store(struct device *dev, struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct rk818_charger *charger = dev_get_drvdata(dev);
+	unsigned int seconds;
+	int ret;
+
+	ret = kstrtouint(buf, 10, &seconds);
+	if (ret)
+		return ret;
+	if (seconds > RK818_VBUS_TEST_MAX_SECONDS)
+		return -EINVAL;
+	if (!seconds)
+		cancel_delayed_work_sync(&charger->vbus_off_work);
+	mutex_lock(&charger->vbus_lock);
+	if (seconds) {
+		ret = rk818_vbus_test_start(charger);
+		if (!ret) {
+			charger->vbus_deadline = jiffies + seconds * HZ;
+			mod_delayed_work(system_wq, &charger->vbus_off_work, seconds * HZ);
+		}
+	} else {
+		ret = rk818_vbus_test_stop(charger);
+		if (ret)
+			mod_delayed_work(system_wq, &charger->vbus_off_work, HZ);
+	}
+	mutex_unlock(&charger->vbus_lock);
+	mod_delayed_work(system_freezable_wq, &charger->work, 0);
+	if (ret)
+		return ret;
+	return count;
+}
+static DEVICE_ATTR_RW(vbus_test);
+
+static ssize_t vbus_keepalive_store(struct device *dev, struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct rk818_charger *charger = dev_get_drvdata(dev);
+	unsigned int seconds;
+	int ret;
+
+	ret = kstrtouint(buf, 10, &seconds);
+	if (ret)
+		return ret;
+	if (!seconds || seconds > RK818_VBUS_TEST_MAX_SECONDS)
+		return -EINVAL;
+	mutex_lock(&charger->vbus_lock);
+	/* Renewal never starts output, including after OFF, expiry or suspend. */
+	if (charger->vbus_blocked || charger->vbus_stopping || !charger->vbus_enabled ||
+	    READ_ONCE(charger->shutdown_pending) ||
+	    time_after_eq(jiffies, charger->vbus_deadline)) {
+		ret = -ESHUTDOWN;
+	} else {
+		charger->vbus_deadline = jiffies + seconds * HZ;
+		mod_delayed_work(system_wq, &charger->vbus_off_work, seconds * HZ);
+		ret = 0;
+	}
+	mutex_unlock(&charger->vbus_lock);
+	if (ret)
+		return ret;
+	return count;
+}
+static DEVICE_ATTR_WO(vbus_keepalive);
+
+static struct attribute *rk818_vbus_test_attrs[] = {
+	&dev_attr_vbus_test.attr,
+	&dev_attr_vbus_keepalive.attr,
+	NULL,
+};
+
+static const struct attribute_group rk818_vbus_test_group = {
+	.attrs = rk818_vbus_test_attrs,
+};
+
+static void rk818_vbus_test_shutdown(void *data)
+{
+	struct rk818_charger *charger = data;
+	int ret;
+
+	mutex_lock(&charger->vbus_lock);
+	charger->vbus_blocked = true;
+	mutex_unlock(&charger->vbus_lock);
+	cancel_delayed_work_sync(&charger->vbus_off_work);
+	mutex_lock(&charger->vbus_lock);
+	ret = rk818_vbus_test_stop(charger);
+	mutex_unlock(&charger->vbus_lock);
+	if (ret)
+		dev_err(charger->dev, "VBUS shutdown failed: %d\n", ret);
+}
+
 static void rk818_monitor_work(struct work_struct *work)
 {
 	struct rk818_charger *charger =
@@ -1131,9 +1346,20 @@ static int rk818_charger_probe(struct platform_device *pdev)
 	charger->dev = &pdev->dev;
 	charger->rk808 = rk808;
 	mutex_init(&charger->gauge_lock);
+	mutex_init(&charger->vbus_lock);
+	INIT_DELAYED_WORK(&charger->vbus_off_work, rk818_vbus_test_expire);
 	charger->saved_charge_mah = -1;
 	charger->saved_soc = -1;
 	platform_set_drvdata(pdev, charger);
+	/* Manual-only support: acquiring the supply must not enable output. */
+	if ((of_machine_is_compatible("kingjim,pomera-dm200") ||
+	     of_machine_is_compatible("kingjim,pomera-dm250")) &&
+	    of_property_present(node, "otg-vbus-supply")) {
+		charger->test_vbus = devm_of_regulator_get(&pdev->dev, node, "otg-vbus");
+		if (IS_ERR(charger->test_vbus))
+			return dev_err_probe(&pdev->dev, PTR_ERR(charger->test_vbus),
+					     "failed to get test VBUS supply\n");
+	}
 
 	ret = regmap_update_bits(rk808->regmap, RK818_TS_CTRL_REG,
 				 RK818_TS_CTRL_GG_EN, RK818_TS_CTRL_GG_EN);
@@ -1255,6 +1481,15 @@ static int rk818_charger_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	if (charger->test_vbus) {
+		ret = devm_add_action_or_reset(&pdev->dev, rk818_vbus_test_shutdown, charger);
+		if (ret)
+			return ret;
+		ret = devm_device_add_group(&pdev->dev, &rk818_vbus_test_group);
+		if (ret)
+			return ret;
+	}
+
 	mod_delayed_work(system_freezable_wq, &charger->work, 0);
 	dev_info(&pdev->dev, "RK818 battery monitor initialized\n");
 
@@ -1264,19 +1499,40 @@ static int rk818_charger_probe(struct platform_device *pdev)
 static int rk818_charger_suspend(struct device *dev)
 {
 	struct rk818_charger *charger = dev_get_drvdata(dev);
-
-	if (READ_ONCE(charger->shutdown_pending))
-		return -EBUSY;
+	int ret;
 
 	mutex_lock(&charger->gauge_lock);
-	charger->negative_pending = false;
-	charger->low_voltage_pending = false;
+	if (charger->shutdown_pending) {
+		mutex_unlock(&charger->gauge_lock);
+		return -EBUSY;
+	}
+	mutex_lock(&charger->vbus_lock);
+	charger->vbus_blocked = true;
+	ret = rk818_vbus_test_stop(charger);
+	if (ret) {
+		charger->vbus_blocked = false;
+		mod_delayed_work(system_wq, &charger->vbus_off_work, HZ);
+	}
+	mutex_unlock(&charger->vbus_lock);
+	if (!ret) {
+		charger->negative_pending = false;
+		charger->low_voltage_pending = false;
+	}
 	mutex_unlock(&charger->gauge_lock);
+	if (ret)
+		return ret;
+	cancel_delayed_work_sync(&charger->vbus_off_work);
 
 	/* A new cable cannot be classified while the system is asleep. */
-	return regmap_update_bits(charger->rk808->regmap, RK818_USB_CTRL_REG,
-				  RK818_USB_ILIM_SEL_MASK,
-				  rk818_input_current_sel(RK818_USB_INPUT_CURRENT_UA));
+	ret = regmap_update_bits(charger->rk808->regmap, RK818_USB_CTRL_REG,
+				 RK818_USB_ILIM_SEL_MASK,
+				 rk818_input_current_sel(RK818_USB_INPUT_CURRENT_UA));
+	if (ret) {
+		mutex_lock(&charger->vbus_lock);
+		charger->vbus_blocked = false;
+		mutex_unlock(&charger->vbus_lock);
+	}
+	return ret;
 }
 
 static int rk818_charger_resume(struct device *dev)
@@ -1284,7 +1540,14 @@ static int rk818_charger_resume(struct device *dev)
 	struct rk818_charger *charger = dev_get_drvdata(dev);
 	int ret;
 
-	ret = rk818_charger_init(charger);
+	mutex_lock(&charger->vbus_lock);
+	/* Do not let charger initialization undo exclusion after a failed OFF. */
+	ret = rk818_vbus_test_stop(charger);
+	if (!ret)
+		ret = rk818_charger_init(charger);
+	if (!ret)
+		charger->vbus_blocked = false;
+	mutex_unlock(&charger->vbus_lock);
 	if (ret)
 		return ret;
 	mod_delayed_work(system_freezable_wq, &charger->work, 0);
@@ -1294,8 +1557,14 @@ static int rk818_charger_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(rk818_charger_pm_ops,
 			      rk818_charger_suspend, rk818_charger_resume);
 
+static void rk818_charger_shutdown(struct platform_device *pdev)
+{
+	rk818_vbus_test_shutdown(platform_get_drvdata(pdev));
+}
+
 static struct platform_driver rk818_charger_driver = {
 	.probe = rk818_charger_probe,
+	.shutdown = rk818_charger_shutdown,
 	.driver = {
 		.name = "rk818-charger",
 		.pm = pm_sleep_ptr(&rk818_charger_pm_ops),
