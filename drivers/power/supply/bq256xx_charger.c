@@ -17,6 +17,11 @@
 #include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
+#include <linux/of.h>
+#include <linux/pm.h>
+#include <linux/workqueue.h>
 
 #define BQ256XX_MANUFACTURER "Texas Instruments"
 
@@ -185,6 +190,7 @@
 #define BQ25620_FAULT_MASK_0			0x25
 #define BQ25620_ADC_CONTROL			0x26
 #define BQ25620_ADC_FUNCTION_DISABLE_0	0x27
+#define BQ25620_VBUS_ADC			0x2c
 #define BQ25620_PART_INFORMATION		0x38
 
 #define BQ25620_IINDPM_MASK		GENMASK(11, 4)
@@ -280,6 +286,20 @@
 #define BQ25620_ADC_SAMPLE_SHIFT		4
 #define BQ25620_TS_IGNORE		BIT(7)
 #define BQ25620_TS_IGNORE_SHIFT		7
+
+#define BQ25620_EN_OTG			BIT(6)
+#define BQ25620_EN_HIZ			BIT(4)
+#define BQ25620_DPDM_MASK			(BIT(6) | BIT(4))
+#define BQ25620_FORCE_INDET		BIT(5)
+#define BQ25620_ADC_EN			BIT(7)
+#define BQ25620_ADC_RATE			BIT(6)
+#define BQ25620_ADC_AVG			BIT(3)
+#define BQ25620_ADC_VBUS_DIS		BIT(5)
+#define BQ25620_ADC_DONE			BIT(6)
+#define BQ25620_VBUS_ADC_MASK		GENMASK(14, 2)
+#define BQ25620_VBUS_ADC_STEP_uV		3970
+#define BQ25620_VBUS_SAFE_uV		400000
+#define BQ25620_VBUS_MAX_SECONDS		30
 
 /**
  * struct bq256xx_init_data -
@@ -386,6 +406,21 @@ struct bq256xx_device {
 	const struct bq256xx_chip_info *chip_info;
 	struct bq256xx_state state;
 	int watchdog_timer;
+	/* Manual source state and charge-enable mutations use lock. */
+	struct delayed_work vbus_off_work;
+	bool vbus_opt_in;
+	bool vbus_enabled;
+	bool vbus_stopping;
+	bool vbus_blocked;
+	bool vbus_dying;
+	bool vbus_charge_saved;
+	bool vbus_dpdm_saved;
+	unsigned int vbus_charge;
+	unsigned int vbus_dpdm;
+	unsigned long vbus_deadline;
+	bool vbus_adc_saved;
+	unsigned int vbus_adc;
+	unsigned int vbus_adc_disabled;
 };
 
 /**
@@ -669,6 +704,12 @@ static int bq25620_get_state(struct bq256xx_device *bq,
 	else
 		state->chrg_fault = BQ256XX_CHRG_FAULT_NORMAL;
 	state->ntc_fault = fault_status_0 & BQ256XX_NTC_FAULT_MASK;
+	/* Our source is not an external supply, even after an uncertain OFF. */
+	if (bq->vbus_opt_in && bq->vbus_enabled) {
+		state->online = false;
+		state->vbus_stat = BQ256XX_VBUS_STAT_USB_OTG;
+		state->chrg_stat = BQ256XX_CHRG_STAT_NOT_CHRGING;
+	}
 
 	return 0;
 }
@@ -676,6 +717,7 @@ static int bq25620_get_state(struct bq256xx_device *bq,
 static int bq25620_set_charge_type(struct bq256xx_device *bq, int type)
 {
 	int enable;
+	int ret;
 
 	switch (type) {
 	case POWER_SUPPLY_CHARGE_TYPE_NONE:
@@ -689,9 +731,16 @@ static int bq25620_set_charge_type(struct bq256xx_device *bq, int type)
 		return -EINVAL;
 	}
 
-	return regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_1,
-				 BQ25620_EN_CHG_MASK,
-				 enable << BQ25620_EN_CHG_SHIFT);
+	mutex_lock(&bq->lock);
+	if (bq->vbus_opt_in && (bq->vbus_charge_saved ||
+	    bq->vbus_enabled || bq->vbus_stopping || bq->vbus_dying))
+		ret = -EBUSY;
+	else
+		ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_1,
+					 BQ25620_EN_CHG_MASK,
+					 enable << BQ25620_EN_CHG_SHIFT);
+	mutex_unlock(&bq->lock);
+	return ret;
 }
 
 static int bq25620_get_ichg_curr(struct bq256xx_device *bq)
@@ -1334,9 +1383,447 @@ static int bq256xx_set_input_curr_lim(struct bq256xx_device *bq, int iindpm)
 					BQ256XX_IINDPM_MASK, iindpm_reg_code);
 }
 
+/* Caller holds lock for every helper in the manual source state machine. */
+static int bq25620_vbus_restore_adc(struct bq256xx_device *bq)
+{
+	int ret;
+
+	if (!bq->vbus_adc_saved)
+		return 0;
+	ret = regmap_update_bits(bq->regmap, BQ25620_ADC_CONTROL,
+				 BQ25620_ADC_EN, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(bq->regmap, BQ25620_ADC_FUNCTION_DISABLE_0,
+			   bq->vbus_adc_disabled);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(bq->regmap, BQ25620_ADC_CONTROL,
+				 BQ25620_ADC_EN | BQ25620_ADC_RATE |
+				 BQ25620_ADC_AVG, bq->vbus_adc);
+	if (!ret)
+		bq->vbus_adc_saved = false;
+	return ret;
+}
+
+/*
+ * AUTO_INDET is disabled by hw_init: VBUS_STAT == 0 is NOT absence of
+ * input. Use current raw status and a fresh single-channel one-shot sample.
+ * Half of vSafe0V leaves ADC/residual-voltage margin, but low-voltage accuracy
+ * is unspecified. The sample and EN_OTG cannot be atomic: this is NOT
+ * collision protection against a weak source or a late external connection.
+ * Hardware battery, temperature and boost interlocks remain in force.
+ */
+static int bq25620_vbus_check_input(struct bq256xx_device *bq)
+{
+	unsigned int val;
+	u8 raw[2];
+	int ret, restore;
+
+	ret = regmap_read(bq->regmap, BQ25620_CHARGER_STATUS_1, &val);
+	if (ret)
+		return ret;
+	if (val & (BQ25620_VBUS_STAT_MASK | BQ25620_CHG_STAT_MASK))
+		return -EBUSY;
+	ret = regmap_read(bq->regmap, BQ25620_FAULT_STATUS_0, &val);
+	if (ret)
+		return ret;
+	if (val & BIT(7))
+		return -EBUSY;
+	ret = regmap_read(bq->regmap, BQ25620_ADC_CONTROL, &bq->vbus_adc);
+	if (ret)
+		return ret;
+	ret = regmap_read(bq->regmap, BQ25620_ADC_FUNCTION_DISABLE_0,
+			  &bq->vbus_adc_disabled);
+	if (ret)
+		return ret;
+	bq->vbus_adc_saved = true;
+	ret = regmap_update_bits(bq->regmap, BQ25620_ADC_CONTROL,
+				 BQ25620_ADC_EN, 0);
+	if (ret)
+		goto restore;
+	ret = regmap_write(bq->regmap, BQ25620_ADC_FUNCTION_DISABLE_0,
+			   (u8)~BQ25620_ADC_VBUS_DIS);
+	if (ret)
+		goto restore;
+	ret = regmap_update_bits(bq->regmap, BQ25620_ADC_CONTROL,
+				 BQ25620_ADC_EN | BQ25620_ADC_RATE |
+				 BQ25620_ADC_AVG,
+				 BQ25620_ADC_EN | BQ25620_ADC_RATE);
+	if (ret)
+		goto restore;
+	ret = regmap_read_poll_timeout(bq->regmap, BQ25620_ADC_CONTROL, val,
+				      !(val & BQ25620_ADC_EN), 1000, 300000);
+	if (ret)
+		goto restore;
+	ret = regmap_read(bq->regmap, BQ25620_CHARGER_STATUS_0, &val);
+	if (ret)
+		goto restore;
+	if (!(val & BQ25620_ADC_DONE)) {
+		ret = -EIO;
+		goto restore;
+	}
+	ret = regmap_bulk_read(bq->regmap, BQ25620_VBUS_ADC, raw, sizeof(raw));
+	if (!ret && ((((raw[1] << 8) | raw[0]) &
+		      BQ25620_VBUS_ADC_MASK) >> 2) *
+	    BQ25620_VBUS_ADC_STEP_uV > BQ25620_VBUS_SAFE_uV)
+		ret = -EBUSY;
+restore:
+	restore = bq25620_vbus_restore_adc(bq);
+	return restore ?: ret;
+}
+
+static int bq25620_vbus_stop(struct bq256xx_device *bq)
+{
+	unsigned int val;
+	int ret;
+
+	bq->vbus_stopping = true;
+	if (bq->vbus_enabled) {
+		ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_3,
+					 BQ25620_EN_OTG, 0);
+		if (ret)
+			return ret;
+		ret = regmap_read(bq->regmap, BQ25620_CHARGER_CONTROL_3, &val);
+		if (ret)
+			return ret;
+		if (val & BQ25620_EN_OTG)
+			return -EIO;
+		bq->vbus_enabled = false;
+	}
+	/* No DPDM or charge restore before a positive OFF readback. */
+	if (bq->vbus_dpdm_saved) {
+		ret = regmap_update_bits(bq->regmap, BQ25620_CHARGE_TIMER_CONTROL,
+					 BQ25620_DPDM_MASK, bq->vbus_dpdm);
+		if (ret)
+			return ret;
+		bq->vbus_dpdm_saved = false;
+	}
+	ret = bq25620_vbus_restore_adc(bq);
+	if (ret)
+		return ret;
+	if (bq->vbus_charge_saved) {
+		ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_1,
+					 BQ25620_EN_CHG_MASK, bq->vbus_charge);
+		if (ret) {
+			/* An errored write may have applied; keep the failed stop paused. */
+			regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_1,
+					   BQ25620_EN_CHG_MASK, 0);
+			return ret;
+		}
+		bq->vbus_charge_saved = false;
+	}
+	bq->vbus_stopping = false;
+	return 0;
+}
+
+static void bq25620_vbus_retry(struct bq256xx_device *bq)
+{
+	if (!bq->vbus_dying)
+		mod_delayed_work(system_wq, &bq->vbus_off_work, HZ);
+}
+
+static void bq25620_vbus_expire(struct work_struct *work)
+{
+	struct bq256xx_device *bq =
+		container_of(work, struct bq256xx_device, vbus_off_work.work);
+	int ret;
+
+	mutex_lock(&bq->lock);
+	if (!bq->vbus_dying) {
+		if (!bq->vbus_stopping && bq->vbus_enabled &&
+		    time_before(jiffies, bq->vbus_deadline)) {
+			mod_delayed_work(system_wq, &bq->vbus_off_work,
+					 bq->vbus_deadline - jiffies);
+		} else {
+			ret = bq25620_vbus_stop(bq);
+			if (ret) {
+				dev_err_ratelimited(bq->dev, "VBUS stop failed: %d\n", ret);
+				bq25620_vbus_retry(bq);
+			}
+		}
+	}
+	mutex_unlock(&bq->lock);
+	power_supply_changed(bq->charger);
+}
+
+static int bq25620_vbus_start(struct bq256xx_device *bq, unsigned int seconds)
+{
+	unsigned int charge, dpdm, val;
+	int ret, stop;
+	bool change;
+
+	if (!bq->vbus_opt_in)
+		return -EOPNOTSUPP;
+	if (bq->vbus_enabled || bq->vbus_stopping ||
+	    bq->vbus_blocked || bq->vbus_dying)
+		return -EBUSY;
+	ret = regmap_read(bq->regmap, BQ25620_CHARGER_CONTROL_3, &val);
+	if (ret)
+		return ret;
+	if (val & BQ25620_EN_OTG)
+		return -EBUSY;
+	ret = regmap_read(bq->regmap, BQ25620_CHARGER_CONTROL_1, &charge);
+	if (ret)
+		return ret;
+	if (charge & BQ25620_EN_HIZ)
+		return -EBUSY;
+	ret = regmap_read(bq->regmap, BQ25620_CHARGE_TIMER_CONTROL, &dpdm);
+	if (ret)
+		return ret;
+	if (dpdm & BQ25620_FORCE_INDET)
+		return -EBUSY;
+	ret = bq25620_vbus_check_input(bq);
+	if (ret)
+		goto stop;
+	/* Only the established 5.04-V / 1-A source settings are permitted. */
+	ret = bq256xx_regmap_update_bits_raw(bq->regmap, BQ25620_IOTG_REGULATION,
+			BQ25620_IOTG_MASK, (BQ25620_IOTG_DEF_uA /
+			BQ25620_IOTG_STEP_uA) << BQ25620_IOTG_SHIFT, 2, &change);
+	if (ret)
+		goto stop;
+	ret = bq256xx_regmap_update_bits_raw(bq->regmap, BQ25620_VOTG_REGULATION,
+			BQ25620_VOTG_MASK, (BQ25620_VOTG_DEF_uV /
+			BQ25620_VOTG_STEP_uV) << BQ25620_VOTG_SHIFT, 2, &change);
+	if (ret)
+		goto stop;
+	bq->vbus_charge = charge & BQ25620_EN_CHG_MASK;
+	bq->vbus_charge_saved = true;
+	ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_1,
+				 BQ25620_EN_CHG_MASK, 0);
+	if (ret)
+		goto stop;
+	bq->vbus_dpdm = dpdm & BQ25620_DPDM_MASK;
+	bq->vbus_dpdm_saved = true;
+	ret = regmap_update_bits(bq->regmap, BQ25620_CHARGE_TIMER_CONTROL,
+				 BQ25620_DPDM_MASK, 0);
+	if (ret)
+		goto stop;
+	/* A failed I2C write may still have reached the device: OFF is required. */
+	bq->vbus_enabled = true;
+	ret = regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_3,
+				 BQ25620_EN_OTG, BQ25620_EN_OTG);
+	if (ret)
+		goto stop;
+	/* Datasheet 8.3.6.1 requires 30 ms before actual boost entry. */
+	msleep(35);
+	ret = regmap_read(bq->regmap, BQ25620_CHARGER_CONTROL_3, &val);
+	if (ret)
+		goto stop;
+	if (!(val & BQ25620_EN_OTG)) {
+		ret = -EIO;
+		goto stop;
+	}
+	ret = regmap_read(bq->regmap, BQ25620_CHARGER_STATUS_1, &val);
+	if (ret)
+		goto stop;
+	if ((val & BQ25620_VBUS_STAT_MASK) != BQ25620_VBUS_STAT_MASK) {
+		ret = -EIO;
+		goto stop;
+	}
+	bq->vbus_deadline = jiffies + seconds * HZ;
+	mod_delayed_work(system_wq, &bq->vbus_off_work, seconds * HZ);
+	return 0;
+stop:
+	stop = bq25620_vbus_stop(bq);
+	if (stop) {
+		bq25620_vbus_retry(bq);
+		return stop;
+	}
+	return ret;
+}
+
+static ssize_t vbus_test_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct bq256xx_device *bq = dev_get_drvdata(dev);
+	bool enabled;
+
+	mutex_lock(&bq->lock);
+	enabled = bq->vbus_enabled;
+	mutex_unlock(&bq->lock);
+	return sysfs_emit(buf, "%u\n", enabled);
+}
+
+static ssize_t vbus_test_store(struct device *dev,
+			      struct device_attribute *attr,
+			      const char *buf, size_t count)
+{
+	struct bq256xx_device *bq = dev_get_drvdata(dev);
+	unsigned int seconds;
+	int ret;
+
+	ret = kstrtouint(buf, 10, &seconds);
+	if (ret)
+		return ret;
+	if (seconds > BQ25620_VBUS_MAX_SECONDS)
+		return -EINVAL;
+	mutex_lock(&bq->lock);
+	if (seconds)
+		ret = bq25620_vbus_start(bq, seconds);
+	else if (!bq->vbus_opt_in)
+		ret = -EOPNOTSUPP;
+	else {
+		ret = bq25620_vbus_stop(bq);
+		if (ret)
+			bq25620_vbus_retry(bq);
+	}
+	mutex_unlock(&bq->lock);
+	power_supply_changed(bq->charger);
+	if (ret)
+		return ret;
+	return count;
+}
+
+static ssize_t vbus_keepalive_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	struct bq256xx_device *bq = dev_get_drvdata(dev);
+	unsigned int seconds;
+	int ret;
+
+	ret = kstrtouint(buf, 10, &seconds);
+	if (ret)
+		return ret;
+	if (!seconds || seconds > BQ25620_VBUS_MAX_SECONDS)
+		return -EINVAL;
+	mutex_lock(&bq->lock);
+	if (!bq->vbus_opt_in || !bq->vbus_enabled || bq->vbus_stopping ||
+	    bq->vbus_blocked || bq->vbus_dying ||
+	    time_after_eq(jiffies, bq->vbus_deadline)) {
+		ret = -ESHUTDOWN;
+	} else {
+		bq->vbus_deadline = jiffies + seconds * HZ;
+		mod_delayed_work(system_wq, &bq->vbus_off_work, seconds * HZ);
+	}
+	mutex_unlock(&bq->lock);
+	if (ret)
+		return ret;
+	return count;
+}
+
+static DEVICE_ATTR_RW(vbus_test);
+static DEVICE_ATTR(vbus_keepalive, 0200, NULL, vbus_keepalive_store);
+
+static struct attribute *bq25620_vbus_attrs[] = {
+	&dev_attr_vbus_test.attr,
+	&dev_attr_vbus_keepalive.attr,
+	NULL,
+};
+static const struct attribute_group bq25620_vbus_group = {
+	.attrs = bq25620_vbus_attrs,
+};
+
+static bool bq25620_vbus_supported(struct bq256xx_device *bq)
+{
+	return bq->chip_info->model_id == BQ25620 &&
+		of_machine_is_compatible("kingjim,pomera-dm250us") &&
+		device_property_read_bool(bq->dev, "ti,manual-vbus-control");
+}
+
+/* Permanently close entry points before draining work; never reset uncertain OFF. */
+static void bq25620_vbus_shutdown(struct bq256xx_device *bq)
+{
+	int ret = 0, i;
+
+	if (!bq->vbus_opt_in)
+		return;
+	mutex_lock(&bq->lock);
+	bq->vbus_dying = true;
+	bq->vbus_blocked = true;
+	mutex_unlock(&bq->lock);
+	cancel_delayed_work_sync(&bq->vbus_off_work);
+	mutex_lock(&bq->lock);
+	for (i = 0; i < 3; i++) {
+		ret = bq25620_vbus_stop(bq);
+		if (!ret)
+			break;
+		/* Never leave charging enabled when source OFF is uncertain. */
+		regmap_update_bits(bq->regmap, BQ25620_CHARGER_CONTROL_1,
+				   BQ25620_EN_CHG_MASK, 0);
+		msleep(20);
+	}
+	mutex_unlock(&bq->lock);
+	if (ret)
+		dev_err(bq->dev, "Cannot safely stop VBUS: %d\n", ret);
+}
+
+static int bq256xx_suspend(struct device *dev)
+{
+	struct bq256xx_device *bq = dev_get_drvdata(dev);
+	int ret;
+
+	if (!bq->vbus_opt_in)
+		return 0;
+	mutex_lock(&bq->lock);
+	bq->vbus_blocked = true;
+	ret = bq25620_vbus_stop(bq);
+	if (ret) {
+		/* Suspend was aborted; stopping still rejects ON and renewal. */
+		bq->vbus_blocked = false;
+		bq25620_vbus_retry(bq);
+	}
+	mutex_unlock(&bq->lock);
+	if (!ret)
+		cancel_delayed_work_sync(&bq->vbus_off_work);
+	return ret;
+}
+
+static int bq256xx_resume(struct device *dev)
+{
+	struct bq256xx_device *bq = dev_get_drvdata(dev);
+	int ret;
+
+	if (!bq->vbus_opt_in)
+		return 0;
+	mutex_lock(&bq->lock);
+	ret = bq25620_vbus_stop(bq);
+	if (!ret && !bq->vbus_dying)
+		bq->vbus_blocked = false;
+	else if (ret)
+		bq25620_vbus_retry(bq);
+	mutex_unlock(&bq->lock);
+	return ret;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(bq256xx_pm_ops, bq256xx_suspend, bq256xx_resume);
+
+static void bq256xx_shutdown(struct i2c_client *client)
+{
+	bq25620_vbus_shutdown(i2c_get_clientdata(client));
+}
+
+static void bq256xx_remove(struct i2c_client *client)
+{
+	bq25620_vbus_shutdown(i2c_get_clientdata(client));
+}
+
+static int bq25620_vbus_prepare(struct bq256xx_device *bq)
+{
+	int ret;
+
+	bq->vbus_opt_in = bq25620_vbus_supported(bq);
+	if (!bq->vbus_opt_in)
+		return 0;
+	INIT_DELAYED_WORK(&bq->vbus_off_work, bq25620_vbus_expire);
+	mutex_lock(&bq->lock);
+	/* Clear/read back any inherited EN_OTG before normal charger init. */
+	bq->vbus_enabled = true;
+	ret = bq25620_vbus_stop(bq);
+	mutex_unlock(&bq->lock);
+	return ret;
+}
+
 static void bq256xx_charger_reset(void *data)
 {
 	struct bq256xx_device *bq = data;
+
+	if (bq->vbus_opt_in) {
+		bq25620_vbus_shutdown(bq);
+		cancel_work_sync(&bq->usb_work);
+		return;
+	}
 
 	regmap_update_bits(bq->regmap,
 				bq->chip_info->model_id == BQ25620 ?
@@ -1638,7 +2125,9 @@ static irqreturn_t bq256xx_irq_handler_thread(int irq, void *private)
 	struct bq256xx_state state;
 	int ret;
 
+	mutex_lock(&bq->lock);
 	ret = bq256xx_get_state(bq, &state);
+	mutex_unlock(&bq->lock);
 	if (ret < 0)
 		goto irq_out;
 
@@ -2423,13 +2912,22 @@ static int bq256xx_probe(struct i2c_client *client)
 	INIT_WORK(&bq->usb_work, bq256xx_usb_work);
 	bq->usb_nb.notifier_call = bq256xx_usb_notifier;
 
+	ret = bq25620_vbus_prepare(bq);
+	if (ret) {
+		bq25620_vbus_shutdown(bq);
+		return ret;
+	}
+
 	/* OTG reporting */
-	bq->usb2_phy = devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
-	bq->usb3_phy = devm_usb_get_phy(dev, USB_PHY_TYPE_USB3);
+	bq->usb2_phy = bq->vbus_opt_in ? NULL :
+		devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
+	bq->usb3_phy = bq->vbus_opt_in ? NULL :
+		devm_usb_get_phy(dev, USB_PHY_TYPE_USB3);
 
 	ret = bq256xx_power_supply_init(bq, &psy_cfg, dev);
 	if (ret) {
 		dev_err(dev, "Failed to register power supply\n");
+		bq25620_vbus_shutdown(bq);
 		return ret;
 	}
 
@@ -2461,6 +2959,9 @@ static int bq256xx_probe(struct i2c_client *client)
 		dev_err(dev, "Cannot initialize the chip.\n");
 		return ret;
 	}
+
+	if (bq->vbus_opt_in)
+		return devm_device_add_group(dev, &bq25620_vbus_group);
 
 	return ret;
 }
@@ -2509,8 +3010,11 @@ static struct i2c_driver bq256xx_driver = {
 		.name = "bq256xx-charger",
 		.of_match_table = bq256xx_of_match,
 		.acpi_match_table = bq256xx_acpi_match,
+		.pm = pm_sleep_ptr(&bq256xx_pm_ops),
 	},
 	.probe = bq256xx_probe,
+	.remove = bq256xx_remove,
+	.shutdown = bq256xx_shutdown,
 	.id_table = bq256xx_i2c_ids,
 };
 module_i2c_driver(bq256xx_driver);

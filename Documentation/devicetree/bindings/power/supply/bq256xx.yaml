@@ -111,6 +111,16 @@ properties:
     type: boolean
     description: Indicates that no thermistor is connected to the TS pin
 
+  ti,manual-vbus-control:
+    type: boolean
+    description: |
+      Allow explicitly requested, bounded battery-powered VBUS output on
+      Pomera DM250US with BQ25620. Output is controlled only through the
+      charger's manual lease interface, never by USB role or cable detection.
+      The driver uses 5.04 V and 1 A; this is not a USB-controller supply.
+      Board wiring must support sourcing VBUS. Software input checks cannot
+      protect against connecting another VBUS source while output is active.
+
 required:
   - compatible
   - reg
@@ -131,6 +141,7 @@ allOf:
           maximum: 16800000
     else:
       properties:
+        ti,manual-vbus-control: false
         ti,watchdog-timeout-ms:
           enum: [ 0, 40000, 80000, 160000 ]
         input-voltage-limit-microvolt:

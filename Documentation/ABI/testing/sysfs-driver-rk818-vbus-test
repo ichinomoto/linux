@@ -1,30 +1,43 @@
 What:		/sys/class/power_supply/USB/device/vbus_test
+What:		/sys/class/power_supply/bq256xx-charger/device/vbus_test
 Date:		October 2026
 Contact:	ichinomoto <ichinomoto@gmail.com>
 Description:
-		Manual, leased VBUS output for Pomera DM200 and DM250 only.
-		Available when the charger has an otg-vbus-supply in DT.
+		Manual, leased VBUS output for Pomera DM200, DM250 and DM250US.
+		DM200/DM250 require the RK818 otg-vbus-supply DT property.
+		DM250US requires BQ25620 and ti,manual-vbus-control in DT; the
+		attributes belong to its physical I2C device, not the supply kobject.
+		Other boards and BQ variants do not expose this interface.
 		Read: 1 when this driver has enabled the OTG output, otherwise 0.
 		This is software state, not a connector voltage measurement.
 		Write: 1..30 enables output for that many seconds; 0 stops it.
 		Repeating a nonzero write cannot extend a running lease (EBUSY).
 		Root writes only. No output is started at boot, resume or replug.
-		External VBUS present at start returns EBUSY, using the raw input
-		indication while output is OFF. Before enabling, userspace must
+		External VBUS present at start returns EBUSY, using raw input
+		indications while output is OFF. BQ25620 also requires a fresh,
+		bounded, VBUS-only ADC conversion at or below 400 mV, because a
+		raw VBUS type of zero does not prove absence of input with automatic
+		detection disabled. ADC/I2C errors refuse output. Saved ADC settings
+		are restored. BQ25620 HIZ or forced D+/D- detection refuses startup.
+		It uses direct EN_OTG control at 5.04 V / 1 A and verifies actual
+		boost entry after the hardware's 30-ms delay. Before enabling,
+		userspace must
 		warn that chargers, PCs and VBUS-sourcing hubs MUST NOT be connected
 		until output has been successfully stopped (vbus_ctl off).
 		External supply insertion during output cannot be reliably
 		distinguished from our own voltage. Logical suppression of our own
 		output in charger reporting is not an independent external-power
 		sensor. This interface provides no electrical collision protection.
-		Charging is paused before enabling the regulator and restored only
-		after disabling it successfully. Failed OFF remains non-renewable
+		Charging is paused before enabling output and restored only
+		after successfully disabling it (with BQ25620 OFF readback before
+		restoring D+/D- policy and charging). Failed OFF remains non-renewable
 		and keeps charging paused; the running kernel retries timed and
 		explicit OFF failures. Suspend, hibernate, shutdown and driver unbind
 		stop output. A failed OFF prevents suspend. Resume never starts it.
 		Timeout requires a running kernel; it cannot recover a hardware hang.
 
 What:		/sys/class/power_supply/USB/device/vbus_keepalive
+What:		/sys/class/power_supply/bq256xx-charger/device/vbus_keepalive
 Date:		October 2026
 Contact:	ichinomoto <ichinomoto@gmail.com>
 Description:

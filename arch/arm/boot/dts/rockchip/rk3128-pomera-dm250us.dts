@@ -464,6 +464,7 @@
 		pre-charge-control-microamp = <580000>;
 		termination-control-microamp = <150000>;
 		ti,no-thermistor;
+		ti,manual-vbus-control;
 		status = "okay";
 	};
 };
